@@ -1,0 +1,18 @@
+## Python
+backend/.venv/
+__pycache__/
+*.pyc
+
+## Data (generated project files, sqlite db)
+data/
+
+## Node / frontend
+frontend/node_modules/
+frontend/dist/
+
+## Rust / Tauri (added once Rust toolchain is available)
+frontend/src-tauri/target/
+
+## OS / editor
+.DS_Store
+*.log
