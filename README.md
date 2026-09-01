@@ -43,6 +43,7 @@ npm run dev
 - [環境変数の設定方法](#環境変数の設定方法)
 - [データベースの初期化](#データベースの初期化)
 - [LM Studio のセットアップ](#lm-studio-のセットアップ)
+- [動画生成機能 (実験的)](#動画生成機能-実験的)
 - [トラブルシューティング](#トラブルシューティング)
 - [プロジェクトのディレクトリ構成](#プロジェクトのディレクトリ構成)
 - [開発者向け情報](#開発者向け情報)
@@ -63,8 +64,10 @@ Kairo は、動画素材の取り込み → タイムライン編集 → 無音�
 - **字幕自動生成**: faster-whisper によるローカル文字起こしから字幕(SRT)を生成・編集
 - **AI編集 (自然言語)**: 「無音部分を削除して、字幕をつけてください」のような指示をLLMに渡し、タイムライン操作を自動実行
 - **AI自動制作**: テーマを指示するだけで、LLMが企画・章立て・シーン単位の台本とビジュアル指示を自動生成
+- **画像→動画生成 (実験的)**: 写真をアップロードし、ローカルのStable Video Diffusionモデルで短い動画を生成(`生成`タブ)。完全ローカル・CPU実行、生成結果はMedia Binに自動追加されます。詳細は[動画生成機能](#動画生成機能-実験的)を参照
+- **PC / AI環境診断**: CPU・RAM・GPU・ストレージ・FFmpeg・PyTorch等を自動検出し、このPCで何が実行可能かを表示(`PC診断`タブ)
 - **レンダリング (書き出し)**: FFmpegでタイムラインを1本の動画に書き出し。字幕の焼き込みにも対応
-- **ジョブ進捗表示**: 字幕生成・AI編集・レンダリングなどの非同期処理をバックグラウンドで実行し、進捗をポーリング表示
+- **ジョブ進捗表示**: 字幕生成・AI編集・レンダリング・動画生成などの非同期処理をバックグラウンドで実行し、進捗をポーリング表示
 
 ## 動作環境
 
@@ -324,6 +327,45 @@ curl http://127.0.0.1:8756/api/llm/status
 
 LM Studioが起動していない・Local Serverが無効な場合は、UI上に **「LM Studio: 未接続」** と表示され、AI編集/AI自動制作を実行するとジョブが失敗し、「LM Studioに接続できません」という具体的な日本語エラーメッセージがジョブのステータス欄に表示されます（`backend/app/services/llm_client.py`）。動画の読み込み・タイムライン編集・字幕生成・レンダリングなど、LM Studioを使わない機能は影響を受けず通常通り利用できます。
 
+## 動画生成機能 (実験的)
+
+写真をアップロードして短いImage-to-Video動画をローカルで生成できます(エディタ画面の`生成`タブ)。クラウドAPIは一切使用せず、[Stable Video Diffusion (img2vid)](https://huggingface.co/stabilityai/stable-video-diffusion-img2vid) をCPU上でPyTorch/diffusers経由で実行します。
+
+### セットアップ
+
+`npm run setup` では動画生成用の依存関係(PyTorch/diffusersなど、数百MB)はインストールされません。マルチGBのダウンロードを伴うため、使う場合のみ明示的にインストールしてください。
+
+```powershell
+backend\.venv\Scripts\pip install -r backend/requirements-videogen.txt
+```
+
+初回生成時にStable Video Diffusionのモデル本体(約9.5GB)を自動ダウンロードし、`data/models/`に保存します(以降はオフラインで再利用されます)。
+
+### 使い方と制約
+
+1. `生成`タブを開き、画像(JPG/PNG/WebP)をドラッグ&ドロップ
+2. 「Generate」を押すとジョブが開始し、進捗が表示されます
+3. 完了すると生成された動画がプロジェクトのMedia Binに自動追加されます(通常の読み込み動画と同じように編集・タイムライン追加が可能)
+
+**重要な制約(実機検証済み)**:
+
+- **CPU実行のみ**: このPC(Intel Core Ultra 7 155H / Arc内蔵GPU)にはIntel GPU/OpenVINO/DirectML等のアクセラレーションは未実装です。生成は非常に低速です(下記実測値参照)。
+- **テキストプロンプト非対応**: Stable Video Diffusionのimg2vidパイプラインには文字起こしタキストエンコーダがなく、入力画像と動きの強さのみから生成されます。プロンプト欄はUI上に残していますが、このエンジンでは無視されます(将来、プロンプトに対応するエンジンを追加する際のための共通インターフェースです)。
+- **非商用ライセンス**: Stable Video Diffusion Non-Commercial Research Community Licenseのため、商用利用不可です。個人利用・検証目的に限られます。
+
+### 実機検証結果 (このPC: Intel Core Ultra 7 155H / RAM 32GB / CPU実行)
+
+| 設定 | 解像度 | フレーム数 | ステップ数 | 実測時間(推論のみ) |
+|---|---|---|---|---|
+| 軽量(APIデフォルト) | 384×256 | 8 | 6〜10 | 約4.7分(6ステップ時、47秒/ステップ) |
+| モデルデフォルト | 512×320 | 14 | 15 | 約35分以上(135秒/ステップ、実測は5/15ステップで打ち切り時点の推定) |
+
+軽量設定をAPI/UIのデフォルトとしています。`推定生成時間`はこの実測値から機械が算出した目安で、確定値ではありません(design doc section 15の方針通り)。
+
+### 動画生成エンジンの追加
+
+`backend/app/services/video_engines/`配下に`VideoGenerationEngine`を実装したクラスを追加し、`video_engines/__init__.py`の`_REGISTRY`に登録することで、別のモデル(将来的なIntel GPU対応版・より高品質なモデルなど)に差し替え/追加できます。Kairo本体やUIは特定モデルに依存しません。
+
 ## トラブルシューティング
 
 ### よくあるエラーと対処方法
@@ -362,14 +404,20 @@ Kairo/
 ├── backend/                # FastAPI バックエンド
 │   ├── .venv/               # Python仮想環境 (npm run setupで作成, Git管理外)
 │   ├── .env.example          # 環境変数サンプル
-│   ├── requirements.txt      # Python依存パッケージ
+│   ├── requirements.txt      # Python依存パッケージ (基本機能)
+│   ├── requirements-videogen.txt  # 動画生成用の追加依存関係 (任意インストール)
 │   ├── app/
 │   │   ├── main.py            # FastAPIアプリのエントリーポイント
 │   │   ├── core/               # 設定・DB接続・パス解決
-│   │   ├── api/                 # APIルーター (projects/media/timeline/jobs/subtitles/cut/ai_edit/production)
+│   │   ├── api/                 # APIルーター (projects/media/timeline/jobs/subtitles/cut/ai_edit/production/generation/system)
 │   │   ├── models/               # SQLAlchemyモデル
 │   │   ├── schemas/               # Pydanticスキーマ
-│   │   └── services/               # ビジネスロジック (FFmpeg連携, LLMクライアント, 文字起こし 等)
+│   │   └── services/               # ビジネスロジック
+│   │       ├── video_engines/        # 動画生成エンジン抽象化 (VideoGenerationEngine, SVDEngine)
+│   │       ├── video_generation_service.py  # 画像→動画生成ジョブ
+│   │       ├── system_info_service.py       # PC/AI環境診断
+│   │       ├── generation_diagnostics.py    # 生成失敗時のエラー原因分析
+│   │       └── (FFmpeg連携, LLMクライアント, 文字起こし 等)
 │   └── tests/                # (現状テストファイルは未追加)
 ├── frontend/                # React + Vite フロントエンド
 │   ├── .env.example           # 環境変数サンプル
@@ -428,4 +476,5 @@ npm --prefix frontend run lint      # oxlintのみ
 
 - バックエンド: FastAPI, SQLAlchemy (SQLite), faster-whisper, FFmpeg (subprocess経由)
 - フロントエンド: React 19, TypeScript, Vite
-- AI: LM Studio等のローカルLLM (OpenAI互換 `/v1/chat/completions`)
+- AI (テキスト): LM Studio等のローカルLLM (OpenAI互換 `/v1/chat/completions`)
+- AI (動画生成・実験的): PyTorch (CPU版) + diffusers + Stable Video Diffusion (`requirements-videogen.txt`、任意インストール)

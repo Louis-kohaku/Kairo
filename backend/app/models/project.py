@@ -50,8 +50,15 @@ class Project(Base):
     production_spec: Mapped["ProductionSpec | None"] = relationship(
         back_populates="project", cascade="all, delete-orphan", uselist=False
     )
+    generations: Mapped[list["Generation"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        order_by="Generation.created_at.desc()",
+        foreign_keys="Generation.project_id",
+    )
 
 
+from app.models.generation import Generation  # noqa: E402
 from app.models.job import Job  # noqa: E402
 from app.models.media_asset import MediaAsset  # noqa: E402
 from app.models.production import Chapter, ProductionSpec  # noqa: E402

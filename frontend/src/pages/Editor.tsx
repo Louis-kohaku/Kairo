@@ -10,6 +10,9 @@ import SubtitlePanel from "../components/SubtitlePanel";
 import CutPlanPanel from "../components/CutPlanPanel";
 import AIEditPanel from "../components/AIEditPanel";
 import ProductionPanel from "../components/ProductionPanel";
+import GenerationPanel from "../components/GenerationPanel";
+import SystemInfoPanel from "../components/SystemInfoPanel";
+import LlmStatusBadge from "../components/LlmStatusBadge";
 import { formatTime } from "../utils/format";
 
 export default function Editor({
@@ -19,7 +22,7 @@ export default function Editor({
   projectId: string;
   onBack: () => void;
 }) {
-  const [mode, setMode] = useState<"edit" | "production">("edit");
+  const [mode, setMode] = useState<"edit" | "production" | "generate" | "system">("edit");
   const [project, setProject] = useState<Project | null>(null);
   const [assets, setAssets] = useState<MediaAsset[]>([]);
   const [timeline, setTimeline] = useState<TimelineData | null>(null);
@@ -155,8 +158,21 @@ export default function Editor({
           >
             AI制作
           </button>
+          <button
+            className={mode === "generate" ? "mode-active" : ""}
+            onClick={() => setMode("generate")}
+          >
+            生成
+          </button>
+          <button
+            className={mode === "system" ? "mode-active" : ""}
+            onClick={() => setMode("system")}
+          >
+            PC診断
+          </button>
         </div>
         <span style={{ flex: 1 }} />
+        <LlmStatusBadge />
         {mode === "edit" && (
           <RenderPanel
             projectId={projectId}
@@ -173,6 +189,15 @@ export default function Editor({
       )}
 
       {mode === "production" && <ProductionPanel projectId={projectId} />}
+
+      {mode === "generate" && (
+        <GenerationPanel
+          projectId={projectId}
+          onCompleted={() => api.listMedia(projectId).then(setAssets).catch((e) => setError(String(e)))}
+        />
+      )}
+
+      {mode === "system" && <SystemInfoPanel />}
 
       {mode === "edit" && (
         <>

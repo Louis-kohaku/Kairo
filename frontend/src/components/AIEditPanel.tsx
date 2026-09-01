@@ -1,22 +1,38 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import type { Diagnosis, LLMStatus } from "../types";
 import { useJobPolling } from "../hooks/useJobPolling";
+import AIErrorPanel from "./AIErrorPanel";
+import LlmStatusBadge from "./LlmStatusBadge";
 
 interface Props {
   projectId: string;
   onApplied: () => void;
 }
 
+function parseDiagnosis(raw: string | null): Diagnosis | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as Diagnosis;
+  } catch {
+    return null;
+  }
+}
+
 export default function AIEditPanel({ projectId, onApplied }: Props) {
   const { job, error, setError, track, isBusy } = useJobPolling();
   const [instruction, setInstruction] = useState("");
-  const [llmAvailable, setLlmAvailable] = useState<boolean | null>(null);
+  const [llmStatus, setLlmStatus] = useState<LLMStatus | null>(null);
 
-  useEffect(() => {
+  const refreshLlmStatus = () =>
     api
       .llmStatus()
-      .then((s) => setLlmAvailable(s.available))
-      .catch(() => setLlmAvailable(false));
+      .then(setLlmStatus)
+      .catch(() => setLlmStatus(null));
+
+  useEffect(() => {
+    refreshLlmStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -35,6 +51,8 @@ export default function AIEditPanel({ projectId, onApplied }: Props) {
     }
   };
 
+  const failedDiagnosis = job?.status === "failed" ? parseDiagnosis(job.error_detail) : null;
+
   return (
     <div className="ai-edit-panel">
       <input
@@ -49,24 +67,25 @@ export default function AIEditPanel({ projectId, onApplied }: Props) {
       <button className="primary" onClick={handleRun} disabled={isBusy || !instruction.trim()}>
         {isBusy ? "実行中..." : "AIで編集"}
       </button>
-      <span className={`llm-indicator ${llmAvailable ? "ok" : "off"}`}>
-        {llmAvailable === null
-          ? "LM Studio: 確認中"
-          : llmAvailable
-            ? "LM Studio: 接続済み"
-            : "LM Studio: 未接続"}
-      </span>
+      <LlmStatusBadge status={llmStatus} />
 
       {job && (
         <span className="ai-edit-status">
-          {job.status === "failed" ? (
-            <span style={{ color: "var(--danger)" }}>{job.error}</span>
-          ) : (
-            `${job.message || job.status} (${job.progress.toFixed(0)}%)`
-          )}
+          {job.status === "failed"
+            ? (failedDiagnosis?.summary ?? job.error)
+            : `${job.message || job.status} (${job.progress.toFixed(0)}%)`}
         </span>
       )}
       {error && <span style={{ color: "var(--danger)" }}>{error}</span>}
+
+      {failedDiagnosis && (
+        <AIErrorPanel
+          diagnosis={failedDiagnosis}
+          jobId={job?.id}
+          onRecheck={refreshLlmStatus}
+          onRetry={handleRun}
+        />
+      )}
     </div>
   );
 }

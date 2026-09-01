@@ -10,6 +10,7 @@ drive its progress the same way.
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Callable, Optional
@@ -19,7 +20,7 @@ from app.core.paths import project_dir, renders_dir
 from app.models.job import Job
 from app.models.project import Project
 from app.models.subtitle import SubtitleCue
-from app.services import whisper_service
+from app.services import ai_diagnostics, job_log, whisper_service
 from app.services.ffmpeg import engine
 from app.services.srt import build_srt
 
@@ -123,8 +124,9 @@ def generate_cues_for_project(
 
 
 def generate_subtitles(project_id: str, job_id: str) -> None:
+    log_lines = [job_log.timestamp_line("Subtitle generation started")]
     try:
-        _update_job(job_id, status="running", progress=1.0, message="音声を抽出中")
+        _update_job(job_id, status="running", progress=1.0, message="音声を抽出中", step="transcription")
 
         def on_progress(pct: float, message: str) -> None:
             _update_job(job_id, progress=pct, message=message)
@@ -137,6 +139,18 @@ def generate_subtitles(project_id: str, job_id: str) -> None:
             progress=100.0,
             message=f"{len(cues)}件の字幕を生成しました",
         )
+        log_lines.append(job_log.timestamp_line(f"Generated {len(cues)} cues"))
     except Exception as exc:  # noqa: BLE001 - surfaced to the job row for the UI
         logger.exception("Subtitle generation job %s failed", job_id)
-        _update_job(job_id, status="failed", error=str(exc), message="字幕生成に失敗しました")
+        diagnosis = ai_diagnostics.diagnose(exc, step="transcription")
+        log_lines.append(job_log.timestamp_line(f"ERROR: {diagnosis.summary}"))
+        _update_job(
+            job_id,
+            status="failed",
+            error=diagnosis.summary,
+            error_detail=json.dumps(diagnosis.to_dict(), ensure_ascii=False),
+            step="transcription",
+            message="字幕生成に失敗しました",
+        )
+    finally:
+        job_log.write_log(project_id, "subtitles", job_id, log_lines)

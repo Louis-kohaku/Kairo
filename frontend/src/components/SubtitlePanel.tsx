@@ -1,8 +1,18 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { SubtitleCue } from "../types";
+import type { Diagnosis, SubtitleCue } from "../types";
 import { useJobPolling } from "../hooks/useJobPolling";
 import { formatTime } from "../utils/format";
+import AIErrorPanel from "./AIErrorPanel";
+
+function parseDiagnosis(raw: string | null): Diagnosis | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as Diagnosis;
+  } catch {
+    return null;
+  }
+}
 
 interface Props {
   projectId: string;
@@ -83,6 +93,9 @@ export default function SubtitlePanel({
           </div>
           <span style={{ fontSize: 11 }}>{job.message} ({job.progress.toFixed(0)}%)</span>
         </div>
+      )}
+      {job?.status === "failed" && parseDiagnosis(job.error_detail) && (
+        <AIErrorPanel diagnosis={parseDiagnosis(job.error_detail)!} jobId={job.id} onRetry={handleGenerate} />
       )}
       {error && <div style={{ color: "var(--danger)", fontSize: 12, padding: "0 12px" }}>{error}</div>}
 

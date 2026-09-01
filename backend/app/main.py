@@ -3,7 +3,18 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import ai_edit, cut, jobs, media, production, projects, subtitles, timeline
+from app.api import (
+    ai_edit,
+    cut,
+    generation,
+    jobs,
+    media,
+    production,
+    projects,
+    subtitles,
+    system,
+    timeline,
+)
 from app.core.config import CORS_ORIGINS, ensure_data_dirs
 from app.core.db import init_db
 
@@ -25,6 +36,8 @@ app.include_router(subtitles.router)
 app.include_router(cut.router)
 app.include_router(ai_edit.router)
 app.include_router(production.router)
+app.include_router(generation.router)
+app.include_router(system.router)
 
 
 @app.on_event("startup")

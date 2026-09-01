@@ -12,7 +12,7 @@ import logging
 
 from pydantic import ValidationError
 
-from app.core.config import LLM_MAX_OPERATIONS
+from app.core.config import LLM_BASE_URL, LLM_MAX_OPERATIONS, LLM_MODEL
 from app.core.db import SessionLocal
 from app.core.paths import project_dir
 from app.models.job import Job
@@ -20,7 +20,7 @@ from app.models.media_asset import MediaAsset
 from app.models.project import Project
 from app.models.timeline import Track
 from app.schemas.edit_plan import EditPlan, GenerateSubtitlesOp, RemoveSilenceOp, SetBgmVolumeOp
-from app.services import llm_client, subtitle_service, timeline_service
+from app.services import ai_diagnostics, job_log, llm_client, subtitle_service, timeline_service
 from app.services.ffmpeg.silence import compute_keep_segments, detect_silence
 from app.services.json_extract import JSONExtractionError, parse_json_object
 
@@ -123,6 +123,13 @@ def _execute_set_bgm_volume(db, project_id: str, op: SetBgmVolumeOp) -> None:
 
 def run_ai_edit(project_id: str, job_id: str, instruction: str) -> None:
     db = SessionLocal()
+    current_step = "plan_generation"
+    log_lines: list[str] = [
+        job_log.timestamp_line("AI edit started"),
+        job_log.timestamp_line("AI Provider: LM Studio"),
+        job_log.timestamp_line(f"Model: {LLM_MODEL}"),
+        job_log.timestamp_line(f"Endpoint: {LLM_BASE_URL}/chat/completions"),
+    ]
     try:
         project = db.get(Project, project_id)
         if project is None:
@@ -136,9 +143,11 @@ def run_ai_edit(project_id: str, job_id: str, instruction: str) -> None:
             db.query(MediaAsset).filter(MediaAsset.project_id == project_id).all()
         )
 
-        _update_job(job_id, status="running", progress=2.0, message="AIに問い合わせ中")
+        current_step = "plan_generation"
+        _update_job(job_id, status="running", progress=2.0, message="AIに問い合わせ中", step=current_step)
         response_text = llm_client.chat_completion(_build_prompt(instruction, media_assets))
         plan = _parse_plan(response_text)
+        log_lines.append(job_log.timestamp_line("Edit plan received and parsed"))
 
         if not plan.operations:
             _update_job(
@@ -154,10 +163,12 @@ def run_ai_edit(project_id: str, job_id: str, instruction: str) -> None:
 
         for i, op in enumerate(plan.operations):
             label = _OP_LABELS.get(op.op, op.op)
+            current_step = op.op
             _update_job(
                 job_id,
                 progress=round(10 + i / n * 85, 1),
                 message=f"実行中: {label} ({i + 1}/{n})",
+                step=current_step,
             )
 
             if isinstance(op, RemoveSilenceOp):
@@ -172,6 +183,7 @@ def run_ai_edit(project_id: str, job_id: str, instruction: str) -> None:
                 _execute_set_bgm_volume(db, project_id, op)
 
             done_labels.append(label)
+            log_lines.append(job_log.timestamp_line(f"Completed: {label}"))
 
         _update_job(
             job_id,
@@ -179,8 +191,39 @@ def run_ai_edit(project_id: str, job_id: str, instruction: str) -> None:
             progress=100.0,
             message=f"{n}件の操作を実行しました: {', '.join(done_labels)}",
         )
+        log_lines.append(job_log.timestamp_line("AI edit completed"))
     except Exception as exc:  # noqa: BLE001 - surfaced to the job row for the UI
         logger.exception("AI edit job %s failed", job_id)
-        _update_job(job_id, status="failed", error=str(exc), message="AI編集に失敗しました")
+
+        # Only the plan-generation step actually talks to LM Studio; a
+        # failure while executing an already-parsed operation (e.g. ffmpeg
+        # silence detection) has nothing to do with the LLM, so no
+        # ai_context is attached for those steps.
+        context = None
+        if current_step == "plan_generation":
+            status = llm_client.get_status()
+            context = ai_diagnostics.AIContext(
+                provider="LM Studio",
+                model=LLM_MODEL,
+                task="編集指示の解釈",
+                operation="Chat Completion",
+                endpoint=f"{LLM_BASE_URL}/chat/completions",
+                model_status="loaded" if status.can_generate else (
+                    "not_loaded" if status.api_ok else "unreachable"
+                ),
+            )
+        diagnosis = ai_diagnostics.diagnose(exc, context=context, step=current_step)
+        log_lines.append(job_log.timestamp_line(f"ERROR: {diagnosis.summary}"))
+        log_lines.append(job_log.timestamp_line("AI edit aborted"))
+
+        _update_job(
+            job_id,
+            status="failed",
+            error=diagnosis.summary,
+            error_detail=json.dumps(diagnosis.to_dict(), ensure_ascii=False),
+            step=current_step,
+            message="AI編集に失敗しました",
+        )
     finally:
+        job_log.write_log(project_id, "ai_edit", job_id, log_lines)
         db.close()

@@ -25,6 +25,12 @@ load_dotenv(BACKEND_ROOT / ".env")
 DATA_ROOT = Path(os.environ.get("KAIRO_DATA_ROOT", REPO_ROOT / "data")).resolve()
 PROJECTS_ROOT = DATA_ROOT / "projects"
 
+# Local AI model weights (image/video generation etc.) are downloaded here
+# instead of the default ~/.cache/huggingface, so every model Kairo uses
+# lives inside DATA_ROOT and shows up in Kairo's own disk-usage / model
+# management views.
+MODELS_ROOT = DATA_ROOT / "models"
+
 DATABASE_PATH = DATA_ROOT / "kairo.db"
 DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
 
@@ -74,6 +80,8 @@ _extra_cors_origins = [
 CORS_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
     "tauri://localhost",
     *_extra_cors_origins,
 ]
@@ -82,3 +90,4 @@ CORS_ORIGINS = [
 def ensure_data_dirs() -> None:
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
+    MODELS_ROOT.mkdir(parents=True, exist_ok=True)

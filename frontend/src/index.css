@@ -680,6 +680,168 @@ input[type="number"]:focus {
   display: block;
 }
 
+/* ---------- Generation panel ---------- */
+
+.generation-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.generation-form {
+  display: flex;
+  gap: 16px;
+  max-width: 900px;
+}
+
+.generation-dropzone {
+  width: 260px;
+  height: 200px;
+  flex-shrink: 0;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.generation-dropzone img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.generation-controls {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 480px;
+}
+
+.generation-engine-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.generation-engine-reason {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.generation-job-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  font-size: 12px;
+}
+
+.generation-diagnosis {
+  max-width: 700px;
+  background: var(--bg-panel);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.generation-diagnosis-cause {
+  margin-bottom: 6px;
+}
+
+.generation-history {
+  margin-top: 16px;
+}
+
+.generation-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+}
+
+.generation-history-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  padding: 6px 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.generation-history-item > span:nth-child(3) {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- System info panel ---------- */
+
+.system-info-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.system-info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.system-info-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 12px;
+}
+
+.system-info-card h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.system-capability-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.system-capability-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  padding: 6px 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.system-capability-label {
+  min-width: 220px;
+  font-weight: 600;
+}
+
 .timeline-clip-delete {
   position: absolute;
   top: 2px;
@@ -690,4 +852,194 @@ input[type="number"]:focus {
   line-height: 1;
   font-size: 12px;
   border-radius: 3px;
+}
+
+/* ---------- AI diagnostics: status badge, error panel, step checklist ---------- */
+
+.llm-status-badge {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.ai-error-panel {
+  max-width: 720px;
+  background: var(--bg-panel);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 12px;
+  margin: 8px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-error-summary {
+  font-weight: 600;
+}
+
+.ai-error-icon {
+  color: var(--danger);
+}
+
+.ai-error-section-title {
+  color: var(--text-dim);
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.ai-error-facts ul,
+.ai-error-candidates ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.ai-error-cause {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ai-error-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ai-error-action {
+  font-size: 12px;
+}
+
+.ai-error-details {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+
+.ai-error-details summary,
+.ai-error-dev-log summary {
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+.ai-error-details-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.ai-error-kv {
+  display: flex;
+  gap: 8px;
+}
+
+.ai-error-kv > span:first-child {
+  min-width: 120px;
+  color: var(--text-dim);
+}
+
+.ai-error-dev-log {
+  margin-top: 6px;
+}
+
+.ai-error-dev-log-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.ai-error-log-pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 11px;
+}
+
+.ai-error-log-error {
+  color: var(--danger);
+}
+
+.production-preflight {
+  font-size: 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.production-preflight-title {
+  color: var(--text-dim);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.production-preflight ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 14px;
+}
+
+.production-preflight li.ok {
+  color: var(--success);
+}
+
+.production-preflight li.bad {
+  color: var(--danger);
+}
+
+.production-preflight-reason {
+  margin-top: 6px;
+  color: var(--warning);
+}
+
+.production-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  font-size: 12px;
+}
+
+.production-step-done {
+  color: var(--success);
+}
+
+.production-step-failed {
+  color: var(--danger);
+}
+
+.production-step-active {
+  color: var(--accent);
+}
+
+.production-step-pending {
+  color: var(--text-dim);
+}
+
+.production-step-unimplemented {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.generation-history-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.generation-history-diagnosis {
+  font-size: 12px;
+}
+
+.generation-history-diagnosis summary {
+  cursor: pointer;
+  color: var(--danger);
 }

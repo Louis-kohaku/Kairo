@@ -1,0 +1,21 @@
+# Optional dependencies for local AI video generation (image-to-video etc.).
+# Not installed by `npm run setup` by default because torch + the SVD model
+# weights are a multi-GB download - install explicitly when you want to use
+# the generation features:
+#
+#   backend\.venv\Scripts\pip install -r backend/requirements-videogen.txt
+#
+# CPU-only PyTorch build (no CUDA/ROCm) since Kairo targets CPU / Intel GPU /
+# Apple Silicon machines without assuming an NVIDIA GPU is present. On first
+# use, models/svd_engine.py downloads its model into data/models/ (~9.5GB
+# for Stable Video Diffusion img2vid).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu
+diffusers==0.40.0
+transformers==5.16.1
+accelerate==1.14.0
+safetensors==0.8.0
+imageio[ffmpeg]==2.37.4
+pillow==12.3.0
+huggingface_hub
+sentencepiece==0.2.2

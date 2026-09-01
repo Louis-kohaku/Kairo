@@ -1,11 +1,22 @@
 import { useState } from "react";
 import { api } from "../api/client";
+import type { Diagnosis } from "../types";
 import { useJobPolling } from "../hooks/useJobPolling";
+import AIErrorPanel from "./AIErrorPanel";
 
 interface Props {
   projectId: string;
   hasVideoClips: boolean;
   hasSubtitles: boolean;
+}
+
+function parseDiagnosis(raw: string | null): Diagnosis | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as Diagnosis;
+  } catch {
+    return null;
+  }
 }
 
 export default function RenderPanel({ projectId, hasVideoClips, hasSubtitles }: Props) {
@@ -65,9 +76,19 @@ export default function RenderPanel({ projectId, hasVideoClips, hasSubtitles }: 
             </a>
           )}
           {job.status === "failed" && (
-            <div style={{ color: "var(--danger)" }}>
-              失敗しました: {job.error}
-            </div>
+            <AIErrorPanel diagnosis={parseDiagnosis(job.error_detail) ?? {
+              summary: job.error ?? "Render failed",
+              cause_known: false,
+              cause: "原因を特定できませんでした。",
+              category: "unknown",
+              facts: [],
+              candidates: [],
+              suggestions: [],
+              ai_context: null,
+              step: job.step,
+              retryable: true,
+              raw_error: job.error ?? "",
+            }} jobId={job.id} onRetry={handleRender} />
           )}
         </div>
       )}

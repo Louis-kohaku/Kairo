@@ -18,14 +18,29 @@ class AIEditRequest(BaseModel):
 
 
 class LLMStatus(BaseModel):
-    available: bool
+    available: bool  # server reachable + API ok (kept for back-compat)
     base_url: str
     model: str
+    server_reachable: bool
+    api_ok: bool
+    models_loaded: list[str]
+    configured_model_loaded: bool
+    can_generate: bool  # the real gate: "connectable" != "can actually generate"
 
 
 @router.get("/llm/status", response_model=LLMStatus)
 def llm_status():
-    return LLMStatus(available=llm_client.is_available(), base_url=LLM_BASE_URL, model=LLM_MODEL)
+    status = llm_client.get_status()
+    return LLMStatus(
+        available=status.server_reachable and status.api_ok,
+        base_url=LLM_BASE_URL,
+        model=LLM_MODEL,
+        server_reachable=status.server_reachable,
+        api_ok=status.api_ok,
+        models_loaded=status.models_loaded,
+        configured_model_loaded=status.configured_model_loaded,
+        can_generate=status.can_generate,
+    )
 
 
 @router.post("/projects/{project_id}/ai-edit", response_model=JobOut)

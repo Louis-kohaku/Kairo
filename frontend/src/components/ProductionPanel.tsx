@@ -1,18 +1,39 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { ProductionData, Scene, VisualType } from "../types";
+import type { Diagnosis, LLMStatus, ProductionData, Scene, VisualType } from "../types";
 import { VISUAL_TYPE_LABELS } from "../types";
 import { useJobPolling } from "../hooks/useJobPolling";
 import { formatTime } from "../utils/format";
+import AIErrorPanel from "./AIErrorPanel";
+import LlmStatusBadge from "./LlmStatusBadge";
 
 const VISUAL_TYPES = Object.keys(VISUAL_TYPE_LABELS) as VisualType[];
+
+// The pipeline as it actually exists today (see production_service.py's
+// module docstring):企画生成 -> 台本・シーン生成. Later phases have no
+// implementation yet, so they are listed separately as "未実装" rather
+// than as checklist steps that could appear to run or fail.
+const PRODUCTION_STEPS: { id: string; label: string }[] = [
+  { id: "planning", label: "企画生成" },
+  { id: "scene_generation", label: "台本・シーン生成" },
+];
+const UNIMPLEMENTED_STAGES = ["画像生成", "動画生成", "音声合成", "FFmpeg編集", "最終書き出し"];
+
+function parseDiagnosis(raw: string | null): Diagnosis | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as Diagnosis;
+  } catch {
+    return null;
+  }
+}
 
 export default function ProductionPanel({ projectId }: { projectId: string }) {
   const { job, error, setError, track, isBusy } = useJobPolling();
   const [data, setData] = useState<ProductionData | null>(null);
   const [instruction, setInstruction] = useState("");
   const [durationMinutes, setDurationMinutes] = useState(10);
-  const [llmAvailable, setLlmAvailable] = useState<boolean | null>(null);
+  const [llmStatus, setLlmStatus] = useState<LLMStatus | null>(null);
 
   const refresh = () => {
     api
@@ -21,13 +42,17 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
       .catch((e) => setError(String(e)));
   };
 
+  const refreshLlmStatus = () =>
+    api
+      .llmStatus()
+      .then(setLlmStatus)
+      .catch(() => setLlmStatus(null));
+
   useEffect(refresh, [projectId]);
 
   useEffect(() => {
-    api
-      .llmStatus()
-      .then((s) => setLlmAvailable(s.available))
-      .catch(() => setLlmAvailable(false));
+    refreshLlmStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -90,6 +115,10 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
       0,
     ) ?? 0;
 
+  const preflightBlocked = llmStatus !== null && !llmStatus.can_generate;
+  const failedDiagnosis = job?.status === "failed" ? parseDiagnosis(job.error_detail) : null;
+  const currentStepIndex = job ? PRODUCTION_STEPS.findIndex((s) => s.id === job.step) : -1;
+
   return (
     <div className="production-panel">
       <div className="production-form">
@@ -112,20 +141,37 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
             disabled={isBusy}
           />
         </label>
+
+        <div className="production-preflight">
+          <div className="production-preflight-title">制作前チェック</div>
+          <ul>
+            <li className={llmStatus?.server_reachable ? "ok" : "bad"}>
+              {llmStatus?.server_reachable ? "✓" : "✗"} LM Studioサーバー
+            </li>
+            <li className={llmStatus?.can_generate ? "ok" : "bad"}>
+              {llmStatus?.can_generate ? "✓" : "✗"} モデルロード状態
+            </li>
+            <li className="ok">✓ プロジェクト設定</li>
+          </ul>
+          {preflightBlocked && (
+            <div className="production-preflight-reason">
+              制作を開始できません。原因:{" "}
+              {llmStatus?.server_reachable
+                ? "使用予定のAIモデルがLM Studioにロードされていません。"
+                : "LM Studioサーバーに接続できません。"}
+            </div>
+          )}
+        </div>
+
         <button
           className="primary"
           onClick={handleStart}
-          disabled={isBusy || !instruction.trim()}
+          disabled={isBusy || !instruction.trim() || preflightBlocked}
+          title={preflightBlocked ? "制作前チェックを満たしていません" : undefined}
         >
           {isBusy ? "制作中..." : data?.spec ? "再生成する" : "AI制作を開始"}
         </button>
-        <span className={`llm-indicator ${llmAvailable ? "ok" : "off"}`}>
-          {llmAvailable === null
-            ? "LM Studio: 確認中"
-            : llmAvailable
-              ? "LM Studio: 接続済み"
-              : "LM Studio: 未接続"}
-        </span>
+        <LlmStatusBadge status={llmStatus} />
       </div>
 
       {job && (
@@ -134,14 +180,43 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
             <div className="render-progress-fill" style={{ width: `${job.progress}%` }} />
           </div>
           <span>
-            {job.status === "failed" ? (
-              <span style={{ color: "var(--danger)" }}>{job.error}</span>
-            ) : (
-              `${job.message || job.status} (${job.progress.toFixed(0)}%)`
-            )}
+            {job.status === "failed"
+              ? (failedDiagnosis?.summary ?? job.error)
+              : `${job.message || job.status} (${job.progress.toFixed(0)}%)`}
           </span>
         </div>
       )}
+
+      <div className="production-steps">
+        {PRODUCTION_STEPS.map((step, i) => {
+          const mark =
+            job?.status === "failed" && i === currentStepIndex
+              ? "✗"
+              : i < currentStepIndex || job?.status === "completed"
+                ? "✓"
+                : i === currentStepIndex
+                  ? "…"
+                  : "○";
+          return (
+            <span key={step.id} className={`production-step production-step-${mark === "✓" ? "done" : mark === "✗" ? "failed" : mark === "…" ? "active" : "pending"}`}>
+              {mark} {step.label}
+            </span>
+          );
+        })}
+        <span className="production-step-unimplemented">
+          未実装(今後追加予定): {UNIMPLEMENTED_STAGES.join(" / ")}
+        </span>
+      </div>
+
+      {failedDiagnosis && (
+        <AIErrorPanel
+          diagnosis={failedDiagnosis}
+          jobId={job?.id}
+          onRecheck={refreshLlmStatus}
+          onRetry={handleStart}
+        />
+      )}
+
       {error && <div style={{ color: "var(--danger)", padding: "0 16px" }}>{error}</div>}
 
       {data?.spec && (

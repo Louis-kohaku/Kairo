@@ -1,6 +1,9 @@
 import type {
   Clip,
+  EngineCapabilities,
+  Generation,
   Job,
+  LLMStatus,
   MediaAsset,
   Project,
   ProductionData,
@@ -8,6 +11,7 @@ import type {
   Segment,
   SilenceCutPlan,
   SubtitleCue,
+  SystemInfo,
   Timeline,
 } from "../types";
 
@@ -151,10 +155,10 @@ export const api = {
       }),
     }),
 
-  llmStatus: () =>
-    request<{ available: boolean; base_url: string; model: string }>(
-      "/api/llm/status",
-    ),
+  llmStatus: () => request<LLMStatus>("/api/llm/status"),
+
+  getJobLog: (jobId: string) =>
+    request<{ log: string }>(`/api/jobs/${jobId}/log`).then((r) => r.log),
 
   aiEdit: (projectId: string, instruction: string) =>
     request<Job>(`/api/projects/${projectId}/ai-edit`, {
@@ -187,4 +191,43 @@ export const api = {
 
   deleteScene: (sceneId: string) =>
     request<{ ok: boolean }>(`/api/scenes/${sceneId}`, { method: "DELETE" }),
+
+  listGenerationEngines: () =>
+    request<EngineCapabilities[]>("/api/generation-engines"),
+
+  generateImageToVideo: (
+    projectId: string,
+    image: File,
+    opts: {
+      prompt?: string;
+      engineId?: string;
+      width?: number;
+      height?: number;
+      numFrames?: number;
+      numInferenceSteps?: number;
+      fps?: number;
+      seed?: number;
+    } = {},
+  ) => {
+    const form = new FormData();
+    form.append("image", image);
+    if (opts.prompt) form.append("prompt", opts.prompt);
+    if (opts.engineId) form.append("engine_id", opts.engineId);
+    if (opts.width) form.append("width", String(opts.width));
+    if (opts.height) form.append("height", String(opts.height));
+    if (opts.numFrames) form.append("num_frames", String(opts.numFrames));
+    if (opts.numInferenceSteps)
+      form.append("num_inference_steps", String(opts.numInferenceSteps));
+    if (opts.fps) form.append("fps", String(opts.fps));
+    if (opts.seed !== undefined) form.append("seed", String(opts.seed));
+    return request<Job>(`/api/projects/${projectId}/generate/image-to-video`, {
+      method: "POST",
+      body: form,
+    });
+  },
+
+  listGenerations: (projectId: string) =>
+    request<Generation[]>(`/api/projects/${projectId}/generations`),
+
+  getSystemInfo: () => request<SystemInfo>("/api/system/info"),
 };

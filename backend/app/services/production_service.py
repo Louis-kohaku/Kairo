@@ -15,16 +15,26 @@ import logging
 
 from pydantic import ValidationError
 
+from app.core.config import LLM_BASE_URL, LLM_MODEL
 from app.core.db import SessionLocal
 from app.core.paths import project_dir
 from app.models.job import Job
 from app.models.production import Chapter, ProductionSpec, Scene
 from app.models.project import Project
 from app.schemas.production import ChapterScript, PlanOutline
-from app.services import llm_client
+from app.services import ai_diagnostics, job_log, llm_client
 from app.services.json_extract import JSONExtractionError, parse_json_object
 
 logger = logging.getLogger(__name__)
+
+# Steps that actually exist today. Kairo's production pipeline is
+# deliberately scoped to planning + scripting (see module docstring) - it
+# never generates media - so the step checklist a client renders must only
+# ever claim these two ran, never later phases that have no implementation.
+STEP_LABELS = {
+    "planning": "企画生成",
+    "scene_generation": "台本・シーン生成",
+}
 
 
 class ProductionError(RuntimeError):
@@ -123,6 +133,13 @@ def run_production(
     project_id: str, job_id: str, instruction: str, target_duration_minutes: float
 ) -> None:
     db = SessionLocal()
+    current_step = "planning"
+    log_lines: list[str] = [
+        job_log.timestamp_line("Production started"),
+        job_log.timestamp_line("AI Provider: LM Studio"),
+        job_log.timestamp_line(f"Model: {LLM_MODEL}"),
+        job_log.timestamp_line(f"Endpoint: {LLM_BASE_URL}/chat/completions"),
+    ]
     try:
         project = db.get(Project, project_id)
         if project is None:
@@ -134,8 +151,11 @@ def run_production(
         db.query(ProductionSpec).filter(ProductionSpec.project_id == project_id).delete()
         db.commit()
 
-        _update_job(db, job_id, status="running", progress=2.0, message="企画中")
+        current_step = "planning"
+        log_lines.append(job_log.timestamp_line(f"Task: {STEP_LABELS['planning']}"))
+        _update_job(db, job_id, status="running", progress=2.0, message="企画中", step=current_step)
         plan = _generate_plan(instruction, target_duration_minutes)
+        log_lines.append(job_log.timestamp_line("Planning request completed"))
 
         db.add(
             ProductionSpec(
@@ -161,15 +181,21 @@ def run_production(
         target_seconds_per_chapter = (target_duration_minutes * 60) / n_chapters
         total_scenes = 0
 
+        current_step = "scene_generation"
+        log_lines.append(job_log.timestamp_line(f"Task: {STEP_LABELS['scene_generation']}"))
         for i, chapter_row in enumerate(chapter_rows):
             _update_job(
                 db,
                 job_id,
                 progress=round(15 + i / n_chapters * 80, 1),
                 message=f"台本・絵コンテを生成中: 第{i + 1}章/{n_chapters}章「{chapter_row.title}」",
+                step=current_step,
             )
             script = _generate_chapter_script(
                 plan, chapter_row.title, chapter_row.summary, target_seconds_per_chapter
+            )
+            log_lines.append(
+                job_log.timestamp_line(f"Chapter {i + 1}/{n_chapters} script generated")
             )
             for j, scene in enumerate(script.scenes):
                 db.add(
@@ -196,11 +222,37 @@ def run_production(
             progress=100.0,
             message=f"企画完了: {n_chapters}章 / {total_scenes}シーン",
         )
+        log_lines.append(job_log.timestamp_line("Production completed"))
     except Exception as exc:  # noqa: BLE001 - surfaced to the job row for the UI
         logger.exception("Production job %s failed", job_id)
         db.rollback()
-        _update_job(db, job_id, status="failed", error=str(exc), message="AI制作に失敗しました")
+
+        status = llm_client.get_status()
+        context = ai_diagnostics.AIContext(
+            provider="LM Studio",
+            model=LLM_MODEL,
+            task=STEP_LABELS.get(current_step, current_step),
+            operation="Chat Completion",
+            endpoint=f"{LLM_BASE_URL}/chat/completions",
+            model_status="loaded" if status.can_generate else (
+                "not_loaded" if status.api_ok else "unreachable"
+            ),
+        )
+        diagnosis = ai_diagnostics.diagnose(exc, context=context, step=current_step)
+        log_lines.append(job_log.timestamp_line(f"ERROR: {diagnosis.summary}"))
+        log_lines.append(job_log.timestamp_line("Production aborted"))
+
+        _update_job(
+            db,
+            job_id,
+            status="failed",
+            error=diagnosis.summary,
+            error_detail=json.dumps(diagnosis.to_dict(), ensure_ascii=False),
+            step=current_step,
+            message="AI制作に失敗しました",
+        )
     finally:
+        job_log.write_log(project_id, "produce", job_id, log_lines)
         db.close()
 
 

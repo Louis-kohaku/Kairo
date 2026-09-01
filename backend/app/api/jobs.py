@@ -9,7 +9,7 @@ from app.core.db import get_db
 from app.core.paths import project_dir
 from app.models.job import Job
 from app.schemas.schemas import JobOut
-from app.services import job_manager
+from app.services import job_log, job_manager
 
 router = APIRouter(prefix="/api", tags=["jobs"])
 
@@ -39,6 +39,18 @@ def list_jobs(project_id: str, db: Session = Depends(get_db)):
         .order_by(Job.created_at.desc())
         .all()
     )
+
+
+@router.get("/jobs/{job_id}/log")
+def get_job_log(job_id: str, db: Session = Depends(get_db)):
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    log_text = job_log.read_log(job.project_id, job.type, job_id)
+    if log_text is None:
+        raise HTTPException(status_code=404, detail="Log not available for this job")
+    return {"log": log_text}
 
 
 @router.get("/jobs/{job_id}/download")

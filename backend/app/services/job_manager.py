@@ -13,7 +13,13 @@ import asyncio
 from sqlalchemy.orm import Session
 
 from app.models.job import Job
-from app.services import ai_edit_service, production_service, render_service, subtitle_service
+from app.services import (
+    ai_edit_service,
+    production_service,
+    render_service,
+    subtitle_service,
+    video_generation_service,
+)
 
 _background_tasks: set[asyncio.Task] = set()
 
@@ -67,6 +73,17 @@ def enqueue_production_job(
         "produce",
         lambda job_id: production_service.run_production(
             project_id, job_id, instruction, target_duration_minutes
+        ),
+    )
+
+
+def enqueue_image_to_video_job(db: Session, project_id: str, generation_id: str) -> Job:
+    return _enqueue(
+        db,
+        project_id,
+        "image_to_video",
+        lambda job_id: video_generation_service.run_image_to_video(
+            project_id, job_id, generation_id
         ),
     )
 

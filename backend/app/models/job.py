@@ -36,6 +36,13 @@ class Job(Base):
     progress: Mapped[float] = mapped_column(Float, default=0.0)  # 0-100
     message: Mapped[str] = mapped_column(String, default="")
     error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Short human-readable summary (kept for simple/back-compat display).
+    # The full structured Diagnosis JSON (facts/cause/ai_context/etc.) lives
+    # in error_detail so clients don't have to guess-parse `error`.
+    error_detail: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Which pipeline step was in progress when the job finished/failed, e.g.
+    # "planning" / "scene_generation" for a production job.
+    step: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     output_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(default=_now)

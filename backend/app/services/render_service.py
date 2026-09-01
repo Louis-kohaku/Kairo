@@ -8,16 +8,18 @@ untouched clips.
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
 from app.core.config import DEFAULT_BGM_VOLUME
 from app.core.db import SessionLocal
-from app.core.paths import logs_dir, project_dir, renders_dir, tmp_segments_dir
+from app.core.paths import project_dir, renders_dir, tmp_segments_dir
 from app.models.job import Job
 from app.models.project import Project
 from app.models.subtitle import SubtitleCue
 from app.models.timeline import Clip, Track
+from app.services import ai_diagnostics, job_log
 from app.services.ffmpeg import engine
 from app.services.srt import build_srt
 
@@ -58,6 +60,7 @@ def _segment_cache_path(project_id: str, clip: Clip, width: int, height: int, fp
 def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> None:
     db = SessionLocal()
     log_lines: list[str] = []
+    current_step = "segment_normalization"
     try:
         project = db.get(Project, project_id)
         if project is None:
@@ -70,7 +73,7 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> No
         if not video_clips:
             raise RenderError("Timeline has no video clips to render")
 
-        _update_job(job_id, status="running", progress=1.0, message="Preparing segments")
+        _update_job(job_id, status="running", progress=1.0, message="Preparing segments", step=current_step)
 
         work_dir = renders_dir(project_id) / "_work" / job_id
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -103,14 +106,16 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> No
             _update_job(job_id, progress=round((i + 1) / n * 70, 1), message=f"Segment {i+1}/{n}")
 
         main_video = work_dir / "main_video.mp4"
-        _update_job(job_id, progress=75.0, message="Concatenating segments")
+        current_step = "concat"
+        _update_job(job_id, progress=75.0, message="Concatenating segments", step=current_step)
         engine.concat_files(segment_paths, main_video, work_dir / "filelist.txt")
 
         final_path = renders_dir(project_id) / f"{job_id}.mp4"
         pre_subtitle_path = work_dir / "pre_subtitle.mp4" if burn_subtitles else final_path
 
         if bgm_clips:
-            _update_job(job_id, progress=82.0, message="Preparing background music")
+            current_step = "audio_mix"
+            _update_job(job_id, progress=82.0, message="Preparing background music", step=current_step)
             bgm_segment_paths = []
             for j, clip in enumerate(bgm_clips):
                 seg = work_dir / f"bgm_seg_{j}.m4a"
@@ -131,6 +136,7 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> No
             main_video.replace(pre_subtitle_path)
 
         if burn_subtitles:
+            current_step = "subtitle_burn"
             cues = (
                 db.query(SubtitleCue)
                 .filter(SubtitleCue.project_id == project_id)
@@ -138,7 +144,7 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> No
                 .all()
             )
             if cues:
-                _update_job(job_id, progress=94.0, message="Burning in subtitles")
+                _update_job(job_id, progress=94.0, message="Burning in subtitles", step=current_step)
                 srt_path = work_dir / "burn.srt"
                 srt_path.write_text(build_srt(cues), encoding="utf-8")
                 engine.burn_subtitles(pre_subtitle_path, srt_path, final_path)
@@ -155,11 +161,16 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> No
         )
     except Exception as exc:  # noqa: BLE001 - surfaced to the job row for the UI
         logger.exception("Render job %s failed", job_id)
-        _update_job(job_id, status="failed", error=str(exc), message="Render failed")
+        diagnosis = ai_diagnostics.diagnose(exc, step=current_step)
+        log_lines.append(f"ERROR: {diagnosis.summary}")
+        _update_job(
+            job_id,
+            status="failed",
+            error=diagnosis.summary,
+            error_detail=json.dumps(diagnosis.to_dict(), ensure_ascii=False),
+            step=current_step,
+            message="Render failed",
+        )
     finally:
-        log_path = logs_dir(project_id) / f"render_{job_id}.log"
-        try:
-            log_path.write_text("\n".join(log_lines), encoding="utf-8")
-        except OSError:
-            pass
+        job_log.write_log(project_id, "render", job_id, log_lines)
         db.close()

@@ -88,6 +88,44 @@ class TimelineOut(BaseModel):
     total_duration: float
 
 
+class GenerationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    project_id: str
+    kind: str
+    engine_id: str
+    prompt: str
+    status: str
+    job_id: Optional[str]
+    output_media_asset_id: Optional[str]
+    elapsed_seconds: Optional[float]
+    error: Optional[str]
+    error_detail: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class EngineCapabilitiesOut(BaseModel):
+    id: str
+    display_name: str
+    supports_text_to_video: bool
+    supports_image_to_video: bool
+    supports_video_to_video: bool
+    prompt_conditioned: bool
+    approx_download_gb: float
+    min_ram_gb: float
+    recommended_ram_gb: float
+    license: str
+    commercial_use: bool
+    notes: str
+    is_model_downloaded: bool
+    status: str  # "ready" | "not_downloaded" | "not_recommended"
+    status_reason: str
+    estimate_low_seconds: Optional[float] = None
+    estimate_high_seconds: Optional[float] = None
+
+
 class JobOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -98,6 +136,8 @@ class JobOut(BaseModel):
     progress: float
     message: str
     error: Optional[str]
+    error_detail: Optional[str] = None
+    step: Optional[str] = None
     output_path: Optional[str]
     created_at: datetime
     updated_at: datetime
