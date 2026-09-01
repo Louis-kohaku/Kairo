@@ -964,6 +964,97 @@ input[type="number"]:focus {
   color: var(--danger);
 }
 
+.ai-error-context,
+.ai-error-models {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-error-models ul,
+.ai-error-solutions ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.ai-error-models-empty {
+  color: var(--text-dim);
+}
+
+.ai-error-solutions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ok {
+  color: var(--success);
+}
+
+.bad {
+  color: var(--danger);
+}
+
+.warn {
+  color: var(--warning);
+}
+
+.llm-status-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.llm-status-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.llm-status-key {
+  min-width: 90px;
+  color: var(--text-dim);
+}
+
+.llm-model-check {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.llm-model-check-button {
+  font-size: 12px;
+}
+
+.llm-model-check-error {
+  color: var(--danger);
+  margin-top: 6px;
+}
+
+.llm-model-check-result {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.llm-model-check-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.llm-model-check-label {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.llm-model-check-row ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
 .production-preflight {
   font-size: 12px;
   background: var(--bg-panel);

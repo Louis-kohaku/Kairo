@@ -181,6 +181,11 @@ export interface AIContext {
   operation: string;
   endpoint: string;
   model_status: string;
+  requested_model: string;
+  is_placeholder_model: boolean;
+  models_loaded: string[];
+  connection_status: string;
+  error_code: string;
 }
 
 export interface Diagnosis {
@@ -195,6 +200,7 @@ export interface Diagnosis {
   step: string | null;
   retryable: boolean;
   raw_error: string;
+  error_code: string;
 }
 
 export interface LLMStatus {
@@ -206,6 +212,10 @@ export interface LLMStatus {
   models_loaded: string[];
   configured_model_loaded: boolean;
   can_generate: boolean;
+  is_placeholder_model: boolean;
+  error_code: string;
+  ready: boolean;
+  diagnosis: Diagnosis | null;
 }
 
 export interface CapabilityRating {

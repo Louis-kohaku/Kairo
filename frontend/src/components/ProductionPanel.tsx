@@ -5,7 +5,16 @@ import { VISUAL_TYPE_LABELS } from "../types";
 import { useJobPolling } from "../hooks/useJobPolling";
 import { formatTime } from "../utils/format";
 import AIErrorPanel from "./AIErrorPanel";
+import LlmModelCheckPanel from "./LlmModelCheckPanel";
 import LlmStatusBadge from "./LlmStatusBadge";
+
+const MODEL_STATUS_LABELS: Record<string, string> = {
+  LM_STUDIO_CONNECTION_FAILED: "未接続",
+  MODELS_FETCH_FAILED: "モデル一覧取得失敗",
+  MODEL_NOT_LOADED: "Not Loaded",
+  MODEL_NOT_FOUND: "Not Found",
+  MODEL_ID_MISMATCH: "ID Mismatch",
+};
 
 const VISUAL_TYPES = Object.keys(VISUAL_TYPE_LABELS) as VisualType[];
 
@@ -115,7 +124,7 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
       0,
     ) ?? 0;
 
-  const preflightBlocked = llmStatus !== null && !llmStatus.can_generate;
+  const preflightBlocked = llmStatus !== null && !llmStatus.ready;
   const failedDiagnosis = job?.status === "failed" ? parseDiagnosis(job.error_detail) : null;
   const currentStepIndex = job ? PRODUCTION_STEPS.findIndex((s) => s.id === job.step) : -1;
 
@@ -144,23 +153,53 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
 
         <div className="production-preflight">
           <div className="production-preflight-title">制作前チェック</div>
-          <ul>
-            <li className={llmStatus?.server_reachable ? "ok" : "bad"}>
-              {llmStatus?.server_reachable ? "✓" : "✗"} LM Studioサーバー
-            </li>
-            <li className={llmStatus?.can_generate ? "ok" : "bad"}>
-              {llmStatus?.can_generate ? "✓" : "✗"} モデルロード状態
-            </li>
-            <li className="ok">✓ プロジェクト設定</li>
-          </ul>
-          {preflightBlocked && (
+          <div className="llm-status-grid">
+            <div className="llm-status-row">
+              <span className="llm-status-key">AI Provider</span>
+              <span className="llm-status-value">LM Studio</span>
+            </div>
+            <div className="llm-status-row">
+              <span className="llm-status-key">Connection</span>
+              <span className={llmStatus?.server_reachable ? "ok" : "bad"}>
+                {llmStatus?.server_reachable ? "● Connected" : "● Disconnected"}
+              </span>
+            </div>
+            <div className="llm-status-row">
+              <span className="llm-status-key">Server</span>
+              <span className={llmStatus?.api_ok ? "ok" : "bad"}>
+                {llmStatus?.api_ok ? "● Running" : "● 応答なし"}
+              </span>
+            </div>
+            <div className="llm-status-row">
+              <span className="llm-status-key">Model</span>
+              <span className={llmStatus?.ready ? "ok" : "warn"}>
+                {llmStatus?.ready ? `● ${llmStatus.model}` : "⚠ Not Loaded"}
+              </span>
+            </div>
+            {llmStatus && !llmStatus.ready && (
+              <div className="llm-status-row">
+                <span className="llm-status-key">Requested</span>
+                <span className="llm-status-value">
+                  {llmStatus.model}
+                  {llmStatus.is_placeholder_model ? "(未設定・アプリの既定値)" : ""}
+                </span>
+              </div>
+            )}
+            <div className="llm-status-row">
+              <span className="llm-status-key">Model Status</span>
+              <span className={llmStatus?.ready ? "ok" : "bad"}>
+                {llmStatus?.ready
+                  ? "● Loaded"
+                  : `● ${MODEL_STATUS_LABELS[llmStatus?.error_code ?? ""] ?? "未確認"}`}
+              </span>
+            </div>
+          </div>
+          {preflightBlocked && llmStatus?.diagnosis && (
             <div className="production-preflight-reason">
-              制作を開始できません。原因:{" "}
-              {llmStatus?.server_reachable
-                ? "使用予定のAIモデルがLM Studioにロードされていません。"
-                : "LM Studioサーバーに接続できません。"}
+              制作を開始できません。原因: {llmStatus.diagnosis.cause || llmStatus.diagnosis.summary}
             </div>
           )}
+          <LlmModelCheckPanel onChecked={setLlmStatus} />
         </div>
 
         <button

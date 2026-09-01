@@ -22,7 +22,7 @@ from app.models.job import Job
 from app.models.production import Chapter, ProductionSpec, Scene
 from app.models.project import Project
 from app.schemas.production import ChapterScript, PlanOutline
-from app.services import ai_diagnostics, job_log, llm_client
+from app.services import ai_diagnostics, job_log, llm_client, llm_preflight
 from app.services.json_extract import JSONExtractionError, parse_json_object
 
 logger = logging.getLogger(__name__)
@@ -139,8 +139,16 @@ def run_production(
         job_log.timestamp_line("AI Provider: LM Studio"),
         job_log.timestamp_line(f"Model: {LLM_MODEL}"),
         job_log.timestamp_line(f"Endpoint: {LLM_BASE_URL}/chat/completions"),
+        job_log.timestamp_line(f"Task: {STEP_LABELS['planning']}"),
     ]
     try:
+        # Check LM Studio (server -> /v1/models -> requested model -> ready)
+        # before doing any work, so a doomed job never gets past "Production
+        # started" with only a vague error to show for it.
+        status = llm_preflight.run_check(log_lines)
+        if not status.ready:
+            raise llm_client.LLMNotReadyError(status)
+
         project = db.get(Project, project_id)
         if project is None:
             raise ProductionError(f"Project {project_id} not found")
@@ -152,7 +160,6 @@ def run_production(
         db.commit()
 
         current_step = "planning"
-        log_lines.append(job_log.timestamp_line(f"Task: {STEP_LABELS['planning']}"))
         _update_job(db, job_id, status="running", progress=2.0, message="企画中", step=current_step)
         plan = _generate_plan(instruction, target_duration_minutes)
         log_lines.append(job_log.timestamp_line("Planning request completed"))
@@ -227,7 +234,7 @@ def run_production(
         logger.exception("Production job %s failed", job_id)
         db.rollback()
 
-        status = llm_client.get_status()
+        status = exc.status if isinstance(exc, llm_client.LLMNotReadyError) else llm_client.get_status()
         context = ai_diagnostics.AIContext(
             provider="LM Studio",
             model=LLM_MODEL,
@@ -237,9 +244,16 @@ def run_production(
             model_status="loaded" if status.can_generate else (
                 "not_loaded" if status.api_ok else "unreachable"
             ),
+            requested_model=LLM_MODEL,
+            is_placeholder_model=status.is_placeholder_model,
+            models_loaded=status.models_loaded,
+            connection_status="OK" if status.server_reachable else "NG",
+            error_code=status.error_code,
         )
         diagnosis = ai_diagnostics.diagnose(exc, context=context, step=current_step)
         log_lines.append(job_log.timestamp_line(f"ERROR: {diagnosis.summary}"))
+        if diagnosis.error_code and not isinstance(exc, llm_client.LLMNotReadyError):
+            log_lines.append(job_log.timestamp_line(f"[LM_STUDIO] ERROR: {diagnosis.error_code}"))
         log_lines.append(job_log.timestamp_line("Production aborted"))
 
         _update_job(

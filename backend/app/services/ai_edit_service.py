@@ -20,7 +20,14 @@ from app.models.media_asset import MediaAsset
 from app.models.project import Project
 from app.models.timeline import Track
 from app.schemas.edit_plan import EditPlan, GenerateSubtitlesOp, RemoveSilenceOp, SetBgmVolumeOp
-from app.services import ai_diagnostics, job_log, llm_client, subtitle_service, timeline_service
+from app.services import (
+    ai_diagnostics,
+    job_log,
+    llm_client,
+    llm_preflight,
+    subtitle_service,
+    timeline_service,
+)
 from app.services.ffmpeg.silence import compute_keep_segments, detect_silence
 from app.services.json_extract import JSONExtractionError, parse_json_object
 
@@ -131,6 +138,13 @@ def run_ai_edit(project_id: str, job_id: str, instruction: str) -> None:
         job_log.timestamp_line(f"Endpoint: {LLM_BASE_URL}/chat/completions"),
     ]
     try:
+        # Check LM Studio (server -> /v1/models -> requested model -> ready)
+        # before doing any work, so a doomed job never gets past "AI edit
+        # started" with only a vague error to show for it.
+        status = llm_preflight.run_check(log_lines)
+        if not status.ready:
+            raise llm_client.LLMNotReadyError(status)
+
         project = db.get(Project, project_id)
         if project is None:
             raise AIEditError(f"Project {project_id} not found")
@@ -201,7 +215,7 @@ def run_ai_edit(project_id: str, job_id: str, instruction: str) -> None:
         # ai_context is attached for those steps.
         context = None
         if current_step == "plan_generation":
-            status = llm_client.get_status()
+            status = exc.status if isinstance(exc, llm_client.LLMNotReadyError) else llm_client.get_status()
             context = ai_diagnostics.AIContext(
                 provider="LM Studio",
                 model=LLM_MODEL,
@@ -211,9 +225,16 @@ def run_ai_edit(project_id: str, job_id: str, instruction: str) -> None:
                 model_status="loaded" if status.can_generate else (
                     "not_loaded" if status.api_ok else "unreachable"
                 ),
+                requested_model=LLM_MODEL,
+                is_placeholder_model=status.is_placeholder_model,
+                models_loaded=status.models_loaded,
+                connection_status="OK" if status.server_reachable else "NG",
+                error_code=status.error_code,
             )
         diagnosis = ai_diagnostics.diagnose(exc, context=context, step=current_step)
         log_lines.append(job_log.timestamp_line(f"ERROR: {diagnosis.summary}"))
+        if diagnosis.error_code and not isinstance(exc, llm_client.LLMNotReadyError):
+            log_lines.append(job_log.timestamp_line(f"[LM_STUDIO] ERROR: {diagnosis.error_code}"))
         log_lines.append(job_log.timestamp_line("AI edit aborted"))
 
         _update_job(

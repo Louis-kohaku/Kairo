@@ -41,6 +41,14 @@ class AIContext:
     operation: str
     endpoint: str
     model_status: str
+    # LM Studio-specific detail (empty/default for non-LLM contexts, e.g.
+    # image-to-video generation) so the UI can show "何が要求されていて、
+    # LM Studio側に今何があるのか" side by side instead of one vague line.
+    requested_model: str = ""
+    is_placeholder_model: bool = False
+    models_loaded: list[str] = field(default_factory=list)
+    connection_status: str = ""
+    error_code: str = ""
 
 
 @dataclass
@@ -56,6 +64,9 @@ class Diagnosis:
     step: str | None = None
     retryable: bool = True
     raw_error: str = ""
+    # Machine-readable code for LM Studio failures (e.g. MODEL_NOT_LOADED) -
+    # "" when this diagnosis isn't one of the classified LM Studio states.
+    error_code: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -70,6 +81,7 @@ class Diagnosis:
             "step": self.step,
             "retryable": self.retryable,
             "raw_error": self.raw_error,
+            "error_code": self.error_code,
         }
 
 
@@ -82,11 +94,152 @@ def _finish(
     return diag
 
 
+def diagnose_llm_status(
+    status: llm_client.LLMStatus, *, context: AIContext | None = None
+) -> Diagnosis:
+    """Explains an LLMStatus in the same terms `diagnose()` uses for a
+    failed job, but doesn't need an exception to produce one - used both
+    for a preflight failure (via LLMNotReadyError below) and for the
+    "モデル状態を確認" button, which asks this question with nothing having
+    failed yet."""
+    available = status.models_loaded
+
+    if status.error_code == llm_client.ERROR_CONNECTION_FAILED:
+        diag = Diagnosis(
+            summary="LM Studio APIに接続できません。",
+            category="ai_provider",
+            error_code=status.error_code,
+            cause_known=True,
+            cause=f"LM Studioのローカルサーバー({status.base_url})に接続できませんでした。",
+            facts=[
+                f"Endpoint: {status.base_url}",
+                status.connection_error or "接続エラーの詳細は取得できませんでした。",
+            ],
+            candidates=[
+                "LM Studioが起動しているか",
+                "LM StudioのLocal Serverが起動しているか",
+                "ポート番号(既定: 1234)が設定と一致しているか",
+            ],
+            suggestions=[
+                Suggestion("LM Studioを起動する", "recheck_status"),
+                Suggestion("LM StudioのDeveloper/ServerタブでLocal Serverを起動する", "recheck_status"),
+                Suggestion("状態を再確認", "recheck_status"),
+            ],
+        )
+    elif status.error_code == llm_client.ERROR_MODELS_FETCH_FAILED:
+        diag = Diagnosis(
+            summary="LM StudioのAPI(/v1/models)からモデル一覧を取得できませんでした。",
+            category="api",
+            error_code=status.error_code,
+            cause_known=True,
+            cause=(
+                "LM Studioのサーバーには接続できましたが、モデル一覧の取得に失敗しました"
+                "(想定外の応答、またはエラーを返しています)。"
+            ),
+            facts=[
+                f"Endpoint: {status.base_url}/models",
+                status.connection_error or "応答の詳細は取得できませんでした。",
+            ],
+            candidates=["LM Studioのバージョンが対応していない", "LM Studio側で一時的なエラーが発生している"],
+            suggestions=[
+                Suggestion("LM Studioを再起動する", "recheck_status"),
+                Suggestion("状態を再確認", "recheck_status"),
+            ],
+        )
+    elif status.error_code == llm_client.ERROR_MODEL_NOT_LOADED:
+        diag = Diagnosis(
+            summary="使用予定のモデルがLM Studioにロードされていません。",
+            category="model",
+            error_code=status.error_code,
+            cause_known=True,
+            cause=(
+                "LM Studioには接続できていますが、現在ロードされているモデルがありません。"
+                "LM Studioでモデルをロードしてください。"
+            ),
+            facts=[
+                "LM Studioサーバーには接続できました。",
+                "現在ロードされているモデル: なし",
+                f"アプリが要求しているモデル: {status.configured_model}",
+            ],
+            suggestions=[
+                Suggestion("LM StudioのDeveloper/ServerタブでモデルをLoadする", "recheck_status"),
+                Suggestion("状態を再確認", "recheck_status"),
+                Suggestion("再試行", "retry"),
+            ],
+        )
+    elif status.error_code == llm_client.ERROR_MODEL_NOT_FOUND:
+        diag = Diagnosis(
+            summary="要求されたモデルがLM Studioで見つかりません。",
+            category="model",
+            error_code=status.error_code,
+            cause_known=True,
+            cause=(
+                f"アプリが要求しているモデル「{status.configured_model}」は、"
+                "現在LM Studioにロードされているモデルの中に見つかりませんでした。"
+            ),
+            facts=[
+                f"Requested: {status.configured_model}",
+                "Available: " + (", ".join(available) if available else "(なし)"),
+            ],
+            candidates=[
+                "モデル名の設定(環境変数 KAIRO_LLM_MODEL)が間違っている",
+                "目的のモデルがLM Studioでまだロードされていない",
+            ],
+            suggestions=[
+                Suggestion(
+                    "LM Studioで目的のモデルをロードする、"
+                    "またはアプリの設定を実際にロード中のモデルIDに合わせる",
+                    "recheck_status",
+                ),
+                Suggestion("状態を再確認", "recheck_status"),
+            ],
+        )
+    elif status.error_code == llm_client.ERROR_MODEL_ID_MISMATCH:
+        diag = Diagnosis(
+            summary="アプリが要求しているモデルIDとLM StudioのモデルIDが一致しません。",
+            category="model",
+            error_code=status.error_code,
+            cause_known=True,
+            cause=(
+                f"アプリの設定は既定値のプレースホルダー「{status.configured_model}」のままで、"
+                "実際にLM Studioでロードされているモデルのidに置き換えられていません。"
+            ),
+            facts=[
+                f"Application: {status.configured_model}",
+                "LM Studio: " + (", ".join(available) if available else "(なし)"),
+            ],
+            suggestions=[
+                Suggestion(
+                    "環境変数 KAIRO_LLM_MODEL を、LM Studioで実際に使用したいモデルのID"
+                    "(上記のLM Studio欄を参照)に設定する",
+                    "recheck_status",
+                ),
+                Suggestion("状態を再確認", "recheck_status"),
+            ],
+        )
+    else:
+        diag = Diagnosis(
+            summary="LM Studioは使用準備ができています。",
+            category="ai_provider",
+            error_code=llm_client.ERROR_OK,
+            cause_known=True,
+            cause="",
+            facts=[f"ロード済みモデル: {', '.join(available)}" if available else ""],
+            retryable=False,
+        )
+
+    diag.ai_context = asdict(context) if context is not None else None
+    return diag
+
+
 def diagnose(
     exc: Exception, *, context: AIContext | None = None, step: str | None = None
 ) -> Diagnosis:
     text = f"{type(exc).__name__}: {exc}".lower()
     exc_name = type(exc).__name__
+
+    if isinstance(exc, llm_client.LLMNotReadyError):
+        return _finish(diagnose_llm_status(exc.status, context=context), exc, context, step)
 
     if isinstance(exc, llm_client.LLMUnavailableError):
         return _finish(

@@ -22,19 +22,20 @@ const CATEGORY_LABELS: Record<string, string> = {
   unknown: "Unknown Error",
 };
 
-const CONTEXT_FIELDS: { key: keyof NonNullable<Diagnosis["ai_context"]>; label: string }[] = [
-  { key: "provider", label: "AI Provider" },
-  { key: "model", label: "Model" },
+// The core "何を使おうとしていて、何が分かっているか" fields - always shown
+// directly in the panel (never behind a collapsed section), per Kairo's
+// policy that AI failure diagnostics must be visible in the main UI.
+const AI_CONTEXT_ROWS: { key: "task" | "provider" | "endpoint"; label: string }[] = [
   { key: "task", label: "Task" },
-  { key: "operation", label: "Operation" },
+  { key: "provider", label: "AI Provider" },
   { key: "endpoint", label: "Endpoint" },
-  { key: "model_status", label: "Model Status" },
 ];
 
 export default function AIErrorPanel({ diagnosis, jobId, onRetry, onRecheck }: Props) {
   const [log, setLog] = useState<string | null>(null);
   const [logLoading, setLogLoading] = useState(false);
   const [logError, setLogError] = useState<string | null>(null);
+  const ctx = diagnosis.ai_context;
 
   const handleLoadLog = async () => {
     if (!jobId || log !== null) return;
@@ -55,6 +56,51 @@ export default function AIErrorPanel({ diagnosis, jobId, onRetry, onRecheck }: P
         <span className="ai-error-icon">⚠</span> {diagnosis.summary}
       </div>
 
+      {ctx && (
+        <div className="ai-error-context">
+          {AI_CONTEXT_ROWS.map(({ key, label }) => (
+            <div className="ai-error-kv" key={key}>
+              <span>{label}</span>
+              <span>{ctx[key]}</span>
+            </div>
+          ))}
+          <div className="ai-error-kv">
+            <span>Requested Model</span>
+            <span>
+              {ctx.requested_model || ctx.model}
+              {ctx.is_placeholder_model ? "(未設定・アプリの既定値)" : ""}
+            </span>
+          </div>
+          <div className="ai-error-kv">
+            <span>LM Studio API接続</span>
+            <span className={ctx.connection_status === "OK" ? "ok" : "bad"}>
+              {ctx.connection_status === "OK" ? "OK" : "NG"}
+            </span>
+          </div>
+          {diagnosis.error_code && (
+            <div className="ai-error-kv">
+              <span>Error Code</span>
+              <span>{diagnosis.error_code}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {ctx && (
+        <div className="ai-error-models">
+          <div className="ai-error-section-title">利用可能なモデル(LM Studioで現在ロード中)</div>
+          {ctx.models_loaded.length > 0 ? (
+            <ul>
+              {ctx.models_loaded.map((m) => (
+                <li key={m}>{m}</li>
+              ))}
+            </ul>
+          ) : (
+            <div className="ai-error-models-empty">(ロード済みモデルなし)</div>
+          )}
+        </div>
+      )}
+
       {diagnosis.facts.length > 0 && (
         <div className="ai-error-facts">
           <div className="ai-error-section-title">確認された状態</div>
@@ -73,12 +119,25 @@ export default function AIErrorPanel({ diagnosis, jobId, onRetry, onRecheck }: P
         <span>{diagnosis.cause}</span>
       </div>
 
-      {!diagnosis.cause_known && diagnosis.candidates.length > 0 && (
+      {diagnosis.candidates.length > 0 && (
         <div className="ai-error-candidates">
-          <div className="ai-error-section-title">考えられる原因</div>
+          <div className="ai-error-section-title">
+            {diagnosis.cause_known ? "確認事項" : "考えられる原因"}
+          </div>
           <ul>
             {diagnosis.candidates.map((c) => (
               <li key={c}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {diagnosis.suggestions.length > 0 && (
+        <div className="ai-error-solutions">
+          <div className="ai-error-section-title">解決方法</div>
+          <ul>
+            {diagnosis.suggestions.map((s) => (
+              <li key={s.label}>{s.label}</li>
             ))}
           </ul>
         </div>
@@ -110,13 +169,12 @@ export default function AIErrorPanel({ diagnosis, jobId, onRetry, onRecheck }: P
               <span>{diagnosis.step}</span>
             </div>
           )}
-          {diagnosis.ai_context &&
-            CONTEXT_FIELDS.map(({ key, label }) => (
-              <div className="ai-error-kv" key={key}>
-                <span>{label}</span>
-                <span>{diagnosis.ai_context![key]}</span>
-              </div>
-            ))}
+          {ctx && (
+            <div className="ai-error-kv">
+              <span>Operation</span>
+              <span>{ctx.operation}</span>
+            </div>
+          )}
           <div className="ai-error-kv">
             <span>再試行可能</span>
             <span>{diagnosis.retryable ? "はい" : "いいえ"}</span>

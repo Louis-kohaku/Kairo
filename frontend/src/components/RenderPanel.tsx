@@ -88,6 +88,7 @@ export default function RenderPanel({ projectId, hasVideoClips, hasSubtitles }: 
               step: job.step,
               retryable: true,
               raw_error: job.error ?? "",
+              error_code: "",
             }} jobId={job.id} onRetry={handleRender} />
           )}
         </div>
