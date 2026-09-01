@@ -3,6 +3,12 @@ backend/.venv/
 __pycache__/
 *.pyc
 
+## Environment variables (copy from .env.example, never commit real values)
+.env
+backend/.env
+frontend/.env
+frontend/.env.local
+
 ## Data (generated project files, sqlite db)
 data/
 

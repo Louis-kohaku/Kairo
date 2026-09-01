@@ -9,8 +9,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 # Repository root is the parent of the `backend` directory this file lives in.
 REPO_ROOT = Path(__file__).resolve().parents[3]
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
+# Load backend/.env if present. Values already set in the real environment
+# always win (python-dotenv's default), so this is a no-op when running
+# under a process manager that injects env vars directly.
+load_dotenv(BACKEND_ROOT / ".env")
 
 # Where all project data (videos, renders, the sqlite db, logs) is stored.
 # Overridable via KAIRO_DATA_ROOT for tests / alternate installs.
@@ -56,10 +64,18 @@ LLM_MODEL = os.environ.get("KAIRO_LLM_MODEL", "local-model")
 LLM_TIMEOUT = float(os.environ.get("KAIRO_LLM_TIMEOUT", "120"))
 LLM_MAX_OPERATIONS = 10
 
+
+# Extra allowed origins (comma-separated), e.g. for accessing the dev
+# frontend from another device on the LAN: KAIRO_CORS_ORIGINS=http://192.168.1.20:5173
+_extra_cors_origins = [
+    o.strip() for o in os.environ.get("KAIRO_CORS_ORIGINS", "").split(",") if o.strip()
+]
+
 CORS_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "tauri://localhost",
+    *_extra_cors_origins,
 ]
 
 

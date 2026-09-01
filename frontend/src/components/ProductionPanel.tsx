@@ -12,6 +12,7 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
   const [data, setData] = useState<ProductionData | null>(null);
   const [instruction, setInstruction] = useState("");
   const [durationMinutes, setDurationMinutes] = useState(10);
+  const [llmAvailable, setLlmAvailable] = useState<boolean | null>(null);
 
   const refresh = () => {
     api
@@ -21,6 +22,13 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
   };
 
   useEffect(refresh, [projectId]);
+
+  useEffect(() => {
+    api
+      .llmStatus()
+      .then((s) => setLlmAvailable(s.available))
+      .catch(() => setLlmAvailable(false));
+  }, []);
 
   useEffect(() => {
     if (job?.status === "completed") refresh();
@@ -111,6 +119,13 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
         >
           {isBusy ? "制作中..." : data?.spec ? "再生成する" : "AI制作を開始"}
         </button>
+        <span className={`llm-indicator ${llmAvailable ? "ok" : "off"}`}>
+          {llmAvailable === null
+            ? "LM Studio: 確認中"
+            : llmAvailable
+              ? "LM Studio: 接続済み"
+              : "LM Studio: 未接続"}
+        </span>
       </div>
 
       {job && (
