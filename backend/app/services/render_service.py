@@ -49,15 +49,17 @@ def _ordered_clips(track: Track | None) -> list[Clip]:
     return sorted(track.clips, key=lambda c: c.order_index)
 
 
-def _segment_cache_path(project_id: str, clip: Clip, width: int, height: int, fps: float) -> Path:
+def _segment_cache_path(
+    project_id: str, clip: Clip, width: int, height: int, fps: float, crf: int
+) -> Path:
     key = (
         f"{clip.media_asset_id}_{clip.in_point:.3f}_{clip.out_point:.3f}"
-        f"_{width}x{height}_{fps:.3f}.mp4"
+        f"_{width}x{height}_{fps:.3f}_crf{crf}.mp4"
     )
     return tmp_segments_dir(project_id) / key
 
 
-def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> None:
+def run_render(project_id: str, job_id: str, burn_subtitles: bool = False, crf: int = 18) -> None:
     db = SessionLocal()
     log_lines: list[str] = []
     current_step = "segment_normalization"
@@ -89,7 +91,7 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> No
         n = len(video_clips)
         for i, clip in enumerate(video_clips):
             dest = _segment_cache_path(
-                project_id, clip, project.width, project.height, project.fps
+                project_id, clip, project.width, project.height, project.fps, crf
             )
             if not app_settings.generation.cache_enabled or not dest.exists():
                 src_path = project_dir(project_id) / clip.media_asset.stored_path
@@ -106,6 +108,7 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> No
                     project.fps,
                     dest,
                     on_progress=on_progress,
+                    crf=crf,
                 )
                 log_lines.append(f"normalized clip {clip.id} -> {dest.name}")
             segment_paths.append(dest)
@@ -154,7 +157,7 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> No
                 srt_path = work_dir / "burn.srt"
                 srt_path.write_text(build_srt(cues), encoding="utf-8")
                 force_style = subtitle_style.build_force_style(app_settings.subtitle)
-                engine.burn_subtitles(pre_subtitle_path, srt_path, final_path, force_style)
+                engine.burn_subtitles(pre_subtitle_path, srt_path, final_path, force_style, crf=crf)
             else:
                 pre_subtitle_path.replace(final_path)
 

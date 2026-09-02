@@ -25,6 +25,32 @@ def create_project(db: Session, name: str, fps: float, width: int, height: int) 
     return project
 
 
+def update_project(
+    db: Session,
+    project: Project,
+    name: str | None = None,
+    fps: float | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> Project:
+    """Updates a project's output settings (used by the editor's video
+    settings panel to change aspect ratio/resolution/fps after creation).
+    Does not touch already-rendered files - the next render simply uses the
+    new values.
+    """
+    if name is not None:
+        project.name = name
+    if fps is not None:
+        project.fps = fps
+    if width is not None:
+        project.width = width
+    if height is not None:
+        project.height = height
+    db.commit()
+    db.refresh(project)
+    return project
+
+
 def list_projects(db: Session) -> list[Project]:
     return db.query(Project).order_by(Project.updated_at.desc()).all()
 

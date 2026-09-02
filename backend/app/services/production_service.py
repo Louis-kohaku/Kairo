@@ -22,7 +22,7 @@ from app.core.paths import project_dir
 from app.models.job import Job
 from app.models.production import Chapter, ProductionSpec, Scene
 from app.models.project import Project
-from app.schemas.production import ChapterScript, PlanOutline
+from app.schemas.production import ChapterScript, PlanOutline, ScenePlan
 from app.services import ai_diagnostics, job_log, llm_client, llm_preflight, time_estimate_service
 from app.services.json_extract import JSONExtractionError, parse_json_object
 
@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 STEP_LABELS = {
     "planning": "企画生成",
     "scene_generation": "台本・シーン生成",
+    "scene_regeneration": "シーン再生成",
 }
 
 
@@ -100,6 +101,120 @@ def _build_chapter_script_prompt(
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+
+
+def _build_scene_regenerate_prompt(
+    spec: ProductionSpec, chapter: Chapter, scene: Scene
+) -> list[dict]:
+    visual_types = (
+        "ai_video, ai_image, photo, diagram, chart, map, text_animation, "
+        "existing_video, existing_image, screen_recording"
+    )
+    system = (
+        "あなたは動画脚本家です。既存の1シーンを、同じ章の流れを保ったまま"
+        "別の切り口で書き直してください。他の文章は一切出力せず、JSONオブジェクトのみを"
+        "返してください。\n\n"
+        "出力形式:\n"
+        '{"narration": "...", "visual_type": "<type>", "visual_prompt": "...", '
+        '"estimated_duration": 5.0}\n\n'
+        f"visual_typeは次のいずれかにしてください: {visual_types}\n"
+        f"長さはおよそ{scene.estimated_duration:.1f}秒のままにしてください。"
+    )
+    user = (
+        f"動画タイトル: {spec.title}\n対象視聴者: {spec.target_audience}\nトーン: {spec.tone}\n\n"
+        f"章タイトル: {chapter.title}\n章の概要: {chapter.summary}\n\n"
+        f"書き直し対象の現在のシーン:\nナレーション: {scene.narration}\n"
+        f"ビジュアルタイプ: {scene.visual_type}\nビジュアル指示: {scene.visual_prompt}"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def run_scene_regenerate(project_id: str, job_id: str, scene_id: str) -> None:
+    """Rewrites a single scene's narration/visual instructions via one LLM
+    call, keeping its position, chapter and (approximate) duration. This is
+    the "再生成" action on a scene card - scoped to the script text only,
+    since Kairo does not yet generate the scene's actual visuals (Phase 5).
+    """
+    db = SessionLocal()
+    current_step = "scene_regeneration"
+    log_lines: list[str] = [
+        job_log.timestamp_line("Scene regeneration started"),
+        job_log.timestamp_line("AI Provider: LM Studio"),
+        job_log.timestamp_line(f"Endpoint: {LLM_BASE_URL}/chat/completions"),
+        job_log.timestamp_line(f"Task: {STEP_LABELS['scene_regeneration']}"),
+    ]
+    try:
+        status = llm_preflight.run_check(log_lines)
+        if not status.ready:
+            raise llm_client.LLMNotReadyError(status)
+
+        scene = db.get(Scene, scene_id)
+        if scene is None or scene.project_id != project_id:
+            raise ProductionError(f"Scene {scene_id} not found")
+        chapter = db.get(Chapter, scene.chapter_id)
+        spec = db.get(ProductionSpec, project_id)
+        if chapter is None or spec is None:
+            raise ProductionError("この動画の企画・章データが見つかりません")
+
+        _update_job(
+            db, job_id, status="running", progress=10.0, message="シーンを再生成中", step=current_step
+        )
+        response = llm_client.chat_completion(_build_scene_regenerate_prompt(spec, chapter, scene))
+        try:
+            data = parse_json_object(response)
+        except JSONExtractionError as exc:
+            raise ProductionError(f"シーンをJSONとして解釈できませんでした: {exc}") from exc
+        try:
+            plan = ScenePlan.model_validate(data)
+        except ValidationError as exc:
+            raise ProductionError(f"再生成結果の形式が不正です: {exc}") from exc
+
+        scene.narration = plan.narration
+        scene.visual_type = plan.visual_type
+        scene.visual_prompt = plan.visual_prompt
+        scene.estimated_duration = plan.estimated_duration
+        scene.status = "pending"
+        db.commit()
+        log_lines.append(job_log.timestamp_line("Scene regenerated"))
+
+        _update_job(db, job_id, status="completed", progress=100.0, message="シーンを再生成しました")
+    except Exception as exc:  # noqa: BLE001 - surfaced to the job row for the UI
+        logger.exception("Scene regenerate job %s failed", job_id)
+        db.rollback()
+
+        status = exc.status if isinstance(exc, llm_client.LLMNotReadyError) else llm_client.get_status()
+        context = ai_diagnostics.AIContext(
+            provider="LM Studio",
+            model=status.configured_model or "(未解決)",
+            task=STEP_LABELS.get(current_step, current_step),
+            operation="Chat Completion",
+            endpoint=f"{LLM_BASE_URL}/chat/completions",
+            model_status="loaded" if status.can_generate else (
+                "not_loaded" if status.api_ok else "unreachable"
+            ),
+            requested_model=status.configured_model or "",
+            model_source=status.model_source,
+            models_loaded=status.models_loaded,
+            connection_status="OK" if status.server_reachable else "NG",
+            error_code=status.error_code,
+        )
+        diagnosis = ai_diagnostics.diagnose(exc, context=context, step=current_step)
+        log_lines.append(job_log.timestamp_line(f"ERROR: {diagnosis.summary}"))
+        _update_job(
+            db,
+            job_id,
+            status="failed",
+            error=diagnosis.summary,
+            error_detail=json.dumps(diagnosis.to_dict(), ensure_ascii=False),
+            step=current_step,
+            message="シーンの再生成に失敗しました",
+        )
+    finally:
+        job_log.write_log(project_id, "scene_regenerate", job_id, log_lines)
+        db.close()
 
 
 def _generate_plan(instruction: str, target_duration_minutes: float) -> PlanOutline:

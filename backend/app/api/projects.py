@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_project_or_404
 from app.core.db import get_db
-from app.schemas.schemas import ProjectCreate, ProjectOut
+from app.schemas.schemas import ProjectCreate, ProjectOut, ProjectUpdate
 from app.services import project_service
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -17,6 +17,14 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
         db, payload.name, payload.fps, payload.width, payload.height
     )
     return project
+
+
+@router.patch("/{project_id}", response_model=ProjectOut)
+def update_project(project_id: str, payload: ProjectUpdate, db: Session = Depends(get_db)):
+    project = get_project_or_404(db, project_id)
+    return project_service.update_project(
+        db, project, payload.name, payload.fps, payload.width, payload.height
+    )
 
 
 @router.get("", response_model=list[ProjectOut])

@@ -38,6 +38,22 @@ export function formatRelativeDate(iso: string): string {
   return date.toLocaleDateString("ja-JP", { year: "numeric", month: "numeric", day: "numeric" });
 }
 
+// mm:ss, no fractional seconds - used for elapsed/remaining render time
+// readouts where tenths of a second would just be visual noise.
+export function formatClock(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
+  const total = Math.round(seconds);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "-";
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
 export function aspectRatioLabel(width: number, height: number): string {
   if (width === height) return "1:1";
   if (width > height) return "16:9";

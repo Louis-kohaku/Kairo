@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../../api/client";
 import type { AISettingsT, EstimateOut, LLMStatus, ModelInfo, QualityPreset } from "../../types";
 import { formatSecondsRangeAsMinutes, MODEL_SOURCE_LABELS } from "../../utils/format";
+import { ASPECTS, QUALITY_PRESETS, resolutionFor, type Aspect } from "../../utils/videoPresets";
 import AIErrorPanel from "../AIErrorPanel";
 import SelectCard from "./SelectCard";
 
@@ -21,32 +22,6 @@ const VIDEO_TYPES: { id: VideoType; label: string; description: string }[] = [
 ];
 
 const LENGTH_PRESETS = [15, 30, 60] as const;
-
-type Aspect = "9:16" | "16:9" | "1:1";
-
-const ASPECTS: { id: Aspect; label: string; description: string }[] = [
-  { id: "9:16", label: "9:16", description: "縦型動画 / Shorts・TikTok" },
-  { id: "16:9", label: "16:9", description: "横型動画 / YouTube" },
-  { id: "1:1", label: "1:1", description: "正方形 / フィード投稿" },
-];
-
-const QUALITY_PRESETS: { id: QualityPreset; label: string; description: string }[] = [
-  { id: "fast", label: "高速", description: "処理時間優先(720p相当・24fps)" },
-  { id: "standard", label: "標準", description: "品質と速度のバランス(1080p相当・30fps)" },
-  { id: "high", label: "高品質", description: "映像品質優先(1080p相当・60fps、処理時間は長め)" },
-];
-
-function resolutionFor(aspect: Aspect, quality: QualityPreset): { width: number; height: number; fps: number } {
-  const base: Record<Aspect, { w: number; h: number }> = {
-    "9:16": { w: 1080, h: 1920 },
-    "16:9": { w: 1920, h: 1080 },
-    "1:1": { w: 1080, h: 1080 },
-  };
-  const scale = quality === "fast" ? 2 / 3 : 1;
-  const fps = quality === "high" ? 60 : quality === "fast" ? 24 : 30;
-  const { w, h } = base[aspect];
-  return { width: Math.round((w * scale) / 2) * 2, height: Math.round((h * scale) / 2) * 2, fps };
-}
 
 export default function NewProjectWizard({ onCreated, onCancel, onOpenSettings }: Props) {
   const [videoType, setVideoType] = useState<VideoType | null>(null);

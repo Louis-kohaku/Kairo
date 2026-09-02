@@ -63,12 +63,14 @@ def _enqueue(db: Session, project_id: str, job_type: str, target) -> Job:
     return job
 
 
-def enqueue_render_job(db: Session, project_id: str, burn_subtitles: bool = False) -> Job:
+def enqueue_render_job(
+    db: Session, project_id: str, burn_subtitles: bool = False, crf: int = 18
+) -> Job:
     return _enqueue(
         db,
         project_id,
         "render",
-        lambda job_id: render_service.run_render(project_id, job_id, burn_subtitles),
+        lambda job_id: render_service.run_render(project_id, job_id, burn_subtitles, crf),
     )
 
 
@@ -100,6 +102,15 @@ def enqueue_production_job(
         lambda job_id: production_service.run_production(
             project_id, job_id, instruction, target_duration_minutes
         ),
+    )
+
+
+def enqueue_scene_regenerate_job(db: Session, project_id: str, scene_id: str) -> Job:
+    return _enqueue(
+        db,
+        project_id,
+        "scene_regenerate",
+        lambda job_id: production_service.run_scene_regenerate(project_id, job_id, scene_id),
     )
 
 

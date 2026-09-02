@@ -88,10 +88,15 @@ def normalize_segment(
     fps: float,
     dest: Path,
     on_progress: Optional[ProgressCallback] = None,
+    crf: int = 18,
 ) -> None:
     """Trim [in_point, out_point) from src and re-encode it to a common
     format/resolution/fps so heterogeneous source clips can later be
     concatenated with a lossless stream copy.
+
+    `crf` is libx264's quality knob (lower = higher quality/larger file,
+    0-51) - the editor's video-settings quality preset maps to a crf value
+    so "品質" actually changes the encoded output, not just resolution/fps.
     """
     duration = max(0.0, out_point - in_point)
     vf = (
@@ -112,7 +117,7 @@ def normalize_segment(
         "-preset",
         "medium",
         "-crf",
-        "18",
+        str(crf),
         "-c:a",
         "aac",
         "-ar",
@@ -195,7 +200,13 @@ def loop_or_trim_audio(src: Path, target_duration: float, dest: Path) -> None:
     _run(args, total_duration=target_duration)
 
 
-def burn_subtitles(video_path: Path, srt_path: Path, dest: Path, force_style: str | None = None) -> None:
+def burn_subtitles(
+    video_path: Path,
+    srt_path: Path,
+    dest: Path,
+    force_style: str | None = None,
+    crf: int = 18,
+) -> None:
     """Hardsub an .srt file onto a video via libass. ffmpeg's filtergraph
     mini-language treats ':' as an option separator, so on Windows the
     drive-letter colon in the path must be escaped.
@@ -219,7 +230,7 @@ def burn_subtitles(video_path: Path, srt_path: Path, dest: Path, force_style: st
         "-preset",
         "medium",
         "-crf",
-        "18",
+        str(crf),
         "-c:a",
         "copy",
         str(dest),

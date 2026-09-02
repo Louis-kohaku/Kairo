@@ -51,6 +51,15 @@ export const api = {
 
   getProject: (id: string) => request<Project>(`/api/projects/${id}`),
 
+  updateProject: (
+    id: string,
+    patch: Partial<Pick<Project, "name" | "fps" | "width" | "height">>,
+  ) =>
+    request<Project>(`/api/projects/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
   deleteProject: (id: string) =>
     request<{ ok: boolean }>(`/api/projects/${id}`, { method: "DELETE" }),
 
@@ -106,9 +115,9 @@ export const api = {
       body: JSON.stringify({ time }),
     }),
 
-  startRender: (projectId: string, burnSubtitles = false) =>
+  startRender: (projectId: string, burnSubtitles = false, crf = 18) =>
     request<Job>(
-      `/api/projects/${projectId}/render?burn_subtitles=${burnSubtitles}`,
+      `/api/projects/${projectId}/render?burn_subtitles=${burnSubtitles}&crf=${crf}`,
       { method: "POST" },
     ),
 
@@ -202,6 +211,9 @@ export const api = {
 
   deleteScene: (sceneId: string) =>
     request<{ ok: boolean }>(`/api/scenes/${sceneId}`, { method: "DELETE" }),
+
+  regenerateScene: (sceneId: string) =>
+    request<Job>(`/api/scenes/${sceneId}/regenerate`, { method: "POST" }),
 
   listGenerationEngines: () =>
     request<EngineCapabilities[]>("/api/generation-engines"),

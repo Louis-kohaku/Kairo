@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { Diagnosis, LLMStatus, ProductionData, Scene, VisualType } from "../types";
 import { VISUAL_TYPE_LABELS } from "../types";
@@ -134,6 +134,17 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
       (n, c) => n + c.scenes.reduce((s, sc) => s + sc.estimated_duration, 0),
       0,
     ) ?? 0;
+
+  const allScenes = data?.chapters.flatMap((c) => c.scenes) ?? [];
+  const sceneOrder = allScenes.map((s) => s.id);
+  const sceneStartTimes: number[] = [];
+  {
+    let cursor = 0;
+    for (const s of allScenes) {
+      sceneStartTimes.push(cursor);
+      cursor += s.estimated_duration;
+    }
+  }
 
   const preflightBlocked = llmStatus !== null && !llmStatus.ready;
   const failedDiagnosis = job?.status === "failed" ? parseDiagnosis(job.error_detail) : null;
@@ -302,16 +313,33 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
               第{ci + 1}章: {chapter.title}
             </div>
             <div className="chapter-summary">{chapter.summary}</div>
-            <div className="scene-list">
-              {chapter.scenes.map((scene, si) => (
-                <SceneCard
-                  key={scene.id}
-                  index={si}
-                  scene={scene}
-                  onUpdate={(patch) => handleUpdateScene(scene.id, patch)}
-                  onDelete={() => handleDeleteScene(scene.id)}
-                />
-              ))}
+            <div className="scene-card-grid">
+              {chapter.scenes.map((scene) => {
+                const globalIndex = sceneOrder.indexOf(scene.id);
+                return (
+                  <SceneCard
+                    key={scene.id}
+                    index={globalIndex}
+                    startTime={sceneStartTimes[globalIndex] ?? 0}
+                    scene={scene}
+                    onUpdate={(patch) => handleUpdateScene(scene.id, patch)}
+                    onDelete={() => handleDeleteScene(scene.id)}
+                    onRegenerated={(updated) =>
+                      setData((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              chapters: prev.chapters.map((ch) => ({
+                                ...ch,
+                                scenes: ch.scenes.map((s) => (s.id === updated.id ? updated : s)),
+                              })),
+                            }
+                          : prev,
+                      )
+                    }
+                  />
+                );
+              })}
             </div>
           </div>
         ))}
@@ -320,72 +348,161 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
   );
 }
 
+const VISUAL_TYPE_ICON: Record<VisualType, string> = {
+  ai_video: "\u{1F3A5}",
+  ai_image: "\u{1F5BC}\u{FE0F}",
+  photo: "\u{1F4F7}",
+  diagram: "\u{1F4CA}",
+  chart: "\u{1F4C8}",
+  map: "\u{1F5FA}\u{FE0F}",
+  text_animation: "\u{1F524}",
+  existing_video: "\u{1F3AC}",
+  existing_image: "\u{1F5BC}\u{FE0F}",
+  screen_recording: "\u{1F5A5}\u{FE0F}",
+};
+
 function SceneCard({
   index,
+  startTime,
   scene,
   onUpdate,
   onDelete,
+  onRegenerated,
 }: {
   index: number;
+  startTime: number;
   scene: Scene;
   onUpdate: (patch: Partial<Scene>) => void;
   onDelete: () => void;
+  onRegenerated: (scene: Scene) => void;
 }) {
   const [narration, setNarration] = useState(scene.narration);
   const [visualPrompt, setVisualPrompt] = useState(scene.visual_prompt);
+  const [expanded, setExpanded] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenError, setRegenError] = useState<string | null>(null);
+  const pollRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setNarration(scene.narration);
+    setVisualPrompt(scene.visual_prompt);
+  }, [scene.narration, scene.visual_prompt]);
+
+  useEffect(() => () => {
+    if (pollRef.current) window.clearInterval(pollRef.current);
+  }, []);
+
+  const handleRegenerate = async () => {
+    setRegenerating(true);
+    setRegenError(null);
+    try {
+      const job = await api.regenerateScene(scene.id);
+      pollRef.current = window.setInterval(async () => {
+        try {
+          const updated = await api.getJob(job.id);
+          if (updated.status === "completed") {
+            if (pollRef.current) window.clearInterval(pollRef.current);
+            const scenes = await api.getProduction(scene.project_id);
+            const fresh = scenes.chapters
+              .flatMap((c) => c.scenes)
+              .find((s) => s.id === scene.id);
+            if (fresh) onRegenerated(fresh);
+            setRegenerating(false);
+          } else if (updated.status === "failed") {
+            if (pollRef.current) window.clearInterval(pollRef.current);
+            setRegenError(updated.error ?? "再生成に失敗しました");
+            setRegenerating(false);
+          }
+        } catch (e) {
+          if (pollRef.current) window.clearInterval(pollRef.current);
+          setRegenError(String(e));
+          setRegenerating(false);
+        }
+      }, 1000);
+    } catch (e) {
+      setRegenError(String(e));
+      setRegenerating(false);
+    }
+  };
 
   return (
     <div className="scene-card">
       <div className="scene-card-header">
-        <span>シーン {index + 1}</span>
+        <span>Scene {String(index + 1).padStart(2, "0")}</span>
         <span className={`scene-status scene-status-${scene.status}`}>{scene.status}</span>
+      </div>
+
+      <div className="scene-card-thumb">
+        <span className="scene-card-thumb-icon">{VISUAL_TYPE_ICON[scene.visual_type]}</span>
+        <span className="scene-card-thumb-label">{VISUAL_TYPE_LABELS[scene.visual_type]}</span>
+      </div>
+
+      <div className="scene-card-time">
+        {formatTime(startTime)} - {formatTime(startTime + scene.estimated_duration)}
+        <span className="scene-card-duration">{scene.estimated_duration.toFixed(1)}秒</span>
+      </div>
+
+      <div className="scene-card-narration">「{scene.narration}」</div>
+
+      <div className="scene-card-buttons">
+        <button onClick={() => setExpanded((e) => !e)}>{expanded ? "編集を閉じる" : "編集"}</button>
+        <button onClick={handleRegenerate} disabled={regenerating}>
+          {regenerating ? "再生成中..." : "再生成"}
+        </button>
         <button className="danger" onClick={onDelete}>
           削除
         </button>
       </div>
-      <label className="scene-field">
-        ナレーション
-        <textarea
-          value={narration}
-          rows={2}
-          onChange={(e) => setNarration(e.target.value)}
-          onBlur={() => onUpdate({ narration })}
-        />
-      </label>
-      <div className="scene-row">
-        <label className="scene-field">
-          ビジュアルタイプ
-          <select
-            value={scene.visual_type}
-            onChange={(e) => onUpdate({ visual_type: e.target.value as VisualType })}
-          >
-            {VISUAL_TYPES.map((vt) => (
-              <option key={vt} value={vt}>
-                {VISUAL_TYPE_LABELS[vt]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="scene-field scene-field-duration">
-          長さ(秒)
-          <input
-            type="number"
-            min={0.5}
-            step={0.5}
-            value={scene.estimated_duration}
-            onChange={(e) => onUpdate({ estimated_duration: Number(e.target.value) })}
-          />
-        </label>
-      </div>
-      <label className="scene-field">
-        ビジュアル指示
-        <textarea
-          value={visualPrompt}
-          rows={2}
-          onChange={(e) => setVisualPrompt(e.target.value)}
-          onBlur={() => onUpdate({ visual_prompt: visualPrompt })}
-        />
-      </label>
+
+      {regenError && <div className="scene-card-regen-error">{regenError}</div>}
+
+      {expanded && (
+        <div className="scene-card-expanded">
+          <label className="scene-field">
+            ナレーション
+            <textarea
+              value={narration}
+              rows={2}
+              onChange={(e) => setNarration(e.target.value)}
+              onBlur={() => onUpdate({ narration })}
+            />
+          </label>
+          <div className="scene-row">
+            <label className="scene-field">
+              ビジュアルタイプ
+              <select
+                value={scene.visual_type}
+                onChange={(e) => onUpdate({ visual_type: e.target.value as VisualType })}
+              >
+                {VISUAL_TYPES.map((vt) => (
+                  <option key={vt} value={vt}>
+                    {VISUAL_TYPE_LABELS[vt]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="scene-field scene-field-duration">
+              長さ(秒)
+              <input
+                type="number"
+                min={0.5}
+                step={0.5}
+                value={scene.estimated_duration}
+                onChange={(e) => onUpdate({ estimated_duration: Number(e.target.value) })}
+              />
+            </label>
+          </div>
+          <label className="scene-field">
+            ビジュアル指示
+            <textarea
+              value={visualPrompt}
+              rows={2}
+              onChange={(e) => setVisualPrompt(e.target.value)}
+              onBlur={() => onUpdate({ visual_prompt: visualPrompt })}
+            />
+          </label>
+        </div>
+      )}
     </div>
   );
 }

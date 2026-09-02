@@ -28,6 +28,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Content-Disposition isn't on the CORS default-safelisted response
+    # header set, so without this the frontend's completion screen (reading
+    # the render's suggested filename via HEAD) silently falls back to the
+    # raw job id instead of the "kairo_<title>_<date>.mp4" name the backend
+    # actually sends (see jobs.py's download endpoint).
+    expose_headers=["Content-Disposition"],
 )
 
 app.include_router(projects.router)

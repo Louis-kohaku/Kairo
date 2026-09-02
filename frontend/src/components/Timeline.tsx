@@ -1,4 +1,4 @@
-import type { MediaAsset, Track } from "../types";
+import type { MediaAsset, SubtitleCue, Track } from "../types";
 import { formatTime } from "../utils/format";
 import { indexAtTime, layoutClips } from "../utils/timelineMath";
 
@@ -14,6 +14,7 @@ interface Props {
   onSelectClip: (clipId: string | null) => void;
   onDropAsset: (trackId: string, assetId: string, index: number) => void;
   onDeleteClip: (clipId: string) => void;
+  subtitleCues?: SubtitleCue[];
 }
 
 export default function Timeline({
@@ -25,10 +26,12 @@ export default function Timeline({
   onSelectClip,
   onDropAsset,
   onDeleteClip,
+  subtitleCues = [],
 }: Props) {
   const totalDuration = Math.max(
     MIN_DURATION,
     ...tracks.map((t) => layoutClips(t.clips).at(-1)?.end ?? 0),
+    ...subtitleCues.map((c) => c.end),
   );
   const rulerWidth = totalDuration * PX_PER_SECOND;
 
@@ -125,6 +128,29 @@ export default function Timeline({
           </div>
         );
       })}
+
+      {subtitleCues.length > 0 && (
+        <div className="timeline-track timeline-track-subtitle" style={{ width: Math.max(rulerWidth, 200) }}>
+          <div className="track-label">字幕</div>
+          {subtitleCues.map((cue) => (
+            <div
+              key={cue.id}
+              className="timeline-clip timeline-subtitle-clip"
+              style={{
+                left: cue.start * PX_PER_SECOND,
+                width: Math.max(4, (cue.end - cue.start) * PX_PER_SECOND - 2),
+              }}
+              title={cue.text}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSeek(cue.start);
+              }}
+            >
+              <span className="timeline-clip-label">{cue.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

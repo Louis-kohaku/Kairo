@@ -13,6 +13,13 @@ class ProjectCreate(BaseModel):
     height: int = 1080
 
 
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    fps: Optional[float] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+
 class ProjectOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
