@@ -556,14 +556,19 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                   />
                 </label>
                 <label className="scene-field">
-                  サイズ
+                  サイズ (px)
                   <input
                     type="number"
                     min={12}
-                    max={120}
+                    max={200}
+                    step={4}
                     value={settings.subtitle.size}
                     onChange={(e) => applyPatch({ subtitle: { size: Number(e.target.value) } })}
                   />
+                  <span className="field-hint">
+                    書き出す動画での実際の高さです。縦型ショートは 80〜100px が目安
+                    （1行あたり約{Math.max(6, Math.round((1080 * 0.85) / (settings.subtitle.size * 1.02)))}文字）。
+                  </span>
                 </label>
                 <label className="scene-field">
                   色

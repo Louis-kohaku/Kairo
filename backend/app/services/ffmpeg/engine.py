@@ -202,23 +202,29 @@ def loop_or_trim_audio(src: Path, target_duration: float, dest: Path) -> None:
 
 def burn_subtitles(
     video_path: Path,
-    srt_path: Path,
+    subtitle_path: Path,
     dest: Path,
     force_style: str | None = None,
     crf: int = 18,
 ) -> None:
-    """Hardsub an .srt file onto a video via libass. ffmpeg's filtergraph
-    mini-language treats ':' as an option separator, so on Windows the
-    drive-letter colon in the path must be escaped.
+    """Hardsub a subtitle file onto a video via libass.
 
-    `force_style` is a libass style override string (e.g.
-    "FontName=Arial,FontSize=48,PrimaryColour=&H00FFFFFF&,Alignment=2"),
-    built from the user's subtitle settings by the caller - see
-    `subtitle_style.build_force_style`.
+    Accepts either an `.ass` script or an `.srt`. Prefer `.ass`: ffmpeg
+    converts SRT using its own reference resolution, so libass then scales
+    FontSize by `video_height / PlayResY` and a "42px" setting renders
+    several times that. An ASS written by `subtitle_style.build_ass`
+    declares PlayRes as the real frame size, which makes its sizes and
+    margins mean output pixels.
+
+    `force_style` is a libass override string; it is only meaningful for
+    the SRT path, since an ASS already carries its own style.
+
+    ffmpeg's filtergraph mini-language treats ':' as an option separator,
+    so on Windows the drive-letter colon in the path must be escaped.
     """
-    escaped_path = str(srt_path.resolve()).replace("\\", "/").replace(":", "\\:")
+    escaped_path = str(subtitle_path.resolve()).replace("\\", "/").replace(":", "\\:")
     filter_value = f"subtitles='{escaped_path}'"
-    if force_style:
+    if force_style and subtitle_path.suffix.lower() != ".ass":
         filter_value += f":force_style='{force_style}'"
     args = [
         "-i",

@@ -42,7 +42,15 @@ export default function PreviewPlayer({
     video.volume = Math.min(1, Math.max(0, current.clip.volume ?? 1));
 
     const applySeek = () => {
-      if (Math.abs(video.currentTime - localTime) > 0.05) {
+      if (isNewClip) {
+        // Assigned unconditionally when the clip changes, and nudged off
+        // zero: at the very start of a video the target time and the
+        // element's currentTime are both 0, so the guarded assignment
+        // below is skipped, no seek is ever requested, and Chrome leaves
+        // the player black until the user scrubs. A 1ms offset is
+        // imperceptible and forces the first frame to be decoded.
+        video.currentTime = Math.max(localTime, 0.001);
+      } else if (Math.abs(video.currentTime - localTime) > 0.05) {
         video.currentTime = localTime;
       }
       if (isPlaying) video.play().catch(() => {});
@@ -89,6 +97,7 @@ export default function PreviewPlayer({
           key="preview-video"
           ref={videoRef}
           src={api.mediaFileUrl(asset.id)}
+          preload="auto"
           onTimeUpdate={handleTimeUpdate}
           onEnded={onEnded}
           style={{ width: "100%", height: "100%", background: "#000" }}

@@ -19,6 +19,17 @@ class LLMUnavailableError(RuntimeError):
     pass
 
 
+class LLMTimeoutError(RuntimeError):
+    """The server accepted the request but did not answer in time.
+
+    Kept separate from LLMUnavailableError because the two need opposite
+    advice: an unreachable server means "start LM Studio", while a timeout
+    means the model is running but too slowly for the current limit - and
+    reporting the second as the first sends the user to check something
+    that is already working.
+    """
+
+
 class LLMResponseError(RuntimeError):
     pass
 
@@ -242,6 +253,10 @@ def chat_completion(messages: list[dict], temperature: float = 0.2) -> str:
 
     try:
         resp = requests.post(url, json=payload, timeout=LLM_TIMEOUT)
+    except requests.Timeout as exc:
+        raise LLMTimeoutError(
+            f"AIモデル「{model_id}」からの応答が{LLM_TIMEOUT:.0f}秒以内に返りませんでした。"
+        ) from exc
     except requests.RequestException as exc:
         raise LLMUnavailableError(
             f"LM Studioに接続できません ({LLM_BASE_URL})。"

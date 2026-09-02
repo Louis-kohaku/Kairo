@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -77,5 +77,37 @@ class Scene(Base):
     visual_prompt: Mapped[str] = mapped_column(String, default="")
     estimated_duration: Mapped[float] = mapped_column(Float, default=5.0)
     status: Mapped[str] = mapped_column(String, default="pending")
+
+    # --- Short-form scene design (design doc section 20) ---
+    # Why this beat exists and what it should make the viewer feel; the
+    # asset, audio and quality stages all read these rather than
+    # re-deriving intent from the narration text.
+    purpose: Mapped[str] = mapped_column(Text, default="")
+    emotion: Mapped[str] = mapped_column(String, default="")
+    camera: Mapped[str] = mapped_column(String, default="")
+    # The on-screen caption, which is deliberately NOT the narration: a
+    # short-form subtitle is a punchy fragment, not a transcript.
+    subtitle_text: Mapped[str] = mapped_column(Text, default="")
+    sfx: Mapped[str] = mapped_column(String, default="")
+    bgm_cue: Mapped[str] = mapped_column(String, default="")
+    transition: Mapped[str] = mapped_column(String, default="cut")
+    continuity: Mapped[str] = mapped_column(Text, default="")
+
+    # --- Produced material (filled in by the asset/narration stages) ---
+    # "auto" lets the asset stage choose; "user" pins a clip the user
+    # supplied so a re-run never silently replaces their own footage
+    # (section 24).
+    asset_source: Mapped[str] = mapped_column(String, default="auto")
+    # The footage the user pinned to this scene, if any. Kept separate from
+    # `media_asset_id` (the rendered clip) so re-rendering the scene never
+    # loses the source it was rendered from.
+    user_asset_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    media_asset_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    narration_asset_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    narration_duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Absolute position on the finished timeline, recomputed whenever any
+    # scene duration changes.
+    start_time: Mapped[float] = mapped_column(Float, default=0.0)
+    is_hook: Mapped[bool] = mapped_column(Boolean, default=False)
 
     chapter: Mapped["Chapter"] = relationship(back_populates="scenes")

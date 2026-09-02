@@ -125,6 +125,27 @@ def enqueue_image_to_video_job(db: Session, project_id: str, generation_id: str)
     )
 
 
+def enqueue_studio_run(run_id: str) -> None:
+    """Schedules a full production run.
+
+    Unlike the other enqueue helpers this creates no Job row: a studio run
+    is tracked by its own ProductionRun record and its event stream, which
+    carry far more than a Job's single status/progress pair. (The render
+    phase still creates a Job internally, so downloads and the existing
+    render UI keep working.)
+    """
+    from app.services.studio import pipeline
+
+    task = asyncio.create_task(_run_studio(pipeline.run, run_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+async def _run_studio(target, run_id: str) -> None:
+    async with _get_semaphore():
+        await asyncio.to_thread(target, run_id)
+
+
 async def _run(target, job_id: str) -> None:
     async with _get_semaphore():
         await asyncio.to_thread(target, job_id)

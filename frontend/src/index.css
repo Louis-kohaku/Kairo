@@ -1,3 +1,5 @@
+@import "./studio.css";
+
 :root {
   color-scheme: dark;
   --bg: #14161a;

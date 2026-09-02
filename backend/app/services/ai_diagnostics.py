@@ -226,6 +226,37 @@ def diagnose(
     if isinstance(exc, llm_client.LLMNotReadyError):
         return _finish(diagnose_llm_status(exc.status, context=context), exc, context, step)
 
+    if isinstance(exc, llm_client.LLMTimeoutError):
+        return _finish(
+            Diagnosis(
+                summary="AIモデルの応答が時間内に返りませんでした。",
+                category="model",
+                cause_known=True,
+                cause=(
+                    "LM Studioには接続できていますが、生成が制限時間内に終わりませんでした。"
+                    "モデルのサイズに対してPCの処理能力が足りていない可能性があります。"
+                ),
+                facts=[
+                    "LM Studioサーバーには接続できました。",
+                    f"待機時間の上限: {llm_client.LLM_TIMEOUT:.0f}秒",
+                    str(exc),
+                ],
+                candidates=[
+                    "モデルが大きすぎる(より小さいモデルなら高速に動作します)",
+                    "GPUではなくCPUで実行されている",
+                    "他の重い処理がPCのリソースを使っている",
+                ],
+                suggestions=[
+                    Suggestion("より小さい/高速なモデルに切り替える", "open_ai_settings"),
+                    Suggestion("この工程から再開する", "retry"),
+                    Suggestion("環境変数 KAIRO_LLM_TIMEOUT を延ばす", "view_log"),
+                ],
+            ),
+            exc,
+            context,
+            step,
+        )
+
     if isinstance(exc, llm_client.LLMUnavailableError):
         return _finish(
             Diagnosis(

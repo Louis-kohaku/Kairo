@@ -102,6 +102,22 @@ export interface Scene {
   visual_prompt: string;
   estimated_duration: number;
   status: string;
+  // Short-form scene design (backend: app/models/production.py). The
+  // caption is deliberately separate from the narration.
+  purpose: string;
+  emotion: string;
+  camera: string;
+  subtitle_text: string;
+  sfx: string;
+  transition: string;
+  continuity: string;
+  asset_source: string;
+  // The user's pinned footage; media_asset_id is the rendered clip.
+  user_asset_id: string | null;
+  media_asset_id: string | null;
+  narration_duration: number | null;
+  start_time: number;
+  is_hook: boolean;
 }
 
 export interface Chapter {
@@ -432,4 +448,231 @@ export interface EstimateOut {
 export interface VideoSettingWarning {
   level: "recommended" | "caution" | "not_recommended";
   reason: string;
+}
+
+// ---- AI Production Studio ----
+//
+// Mirrors backend/app/services/studio/*. The event stream is the single
+// source the progress UI, the activity panel and both logs render from, so
+// these shapes are shared rather than each panel inventing its own.
+
+export interface Phase {
+  id: string;
+  label: string;
+  purpose: string;
+  skippable: boolean;
+}
+
+export type RunStatus =
+  | "pending"
+  | "running"
+  | "pausing"
+  | "paused"
+  | "stopping"
+  | "stopped"
+  | "completed"
+  | "failed";
+
+export type EventStatus = "running" | "done" | "failed" | "skipped" | "paused" | "info";
+
+export interface ProductionEvent {
+  id: string;
+  run_id: string;
+  seq: number;
+  phase: string;
+  phase_label: string;
+  task: string;
+  status: EventStatus;
+  level: "user" | "tech";
+  scene_id: string | null;
+  target: string;
+  message: string;
+  reason: string;
+  next_task: string;
+  progress: number;
+  model: string;
+  error: Diagnosis | null;
+  timestamp: string | null;
+}
+
+export interface ResearchSource {
+  title: string;
+  url: string;
+  snippet: string;
+  fetched: boolean;
+}
+
+export interface TrendReport {
+  query: string;
+  common_patterns: string[];
+  differentiation: string[];
+  typical_duration_seconds: number | null;
+  typical_scene_seconds: number | null;
+  hook_patterns: string[];
+  subtitle_patterns: string[];
+  audio_patterns: string[];
+  ending_patterns: string[];
+  notes: string;
+}
+
+export interface ResearchResult {
+  performed: boolean;
+  skipped_reason: string;
+  queries: string[];
+  sources: ResearchSource[];
+  trends: TrendReport;
+}
+
+export interface ProductionStrategy {
+  target: string;
+  title: string;
+  concept: string;
+  hook: string;
+  pacing: string;
+  scene_seconds_min: number;
+  scene_seconds_max: number;
+  subtitle_policy: string;
+  audio_policy: string;
+  bgm_mood: string;
+  ending: string;
+  differentiation: string;
+  emotional_arc: string[];
+  visual_style: string;
+}
+
+export interface QualityIssue {
+  axis: string;
+  severity: "info" | "minor" | "major";
+  scene_index: number | null;
+  detail: string;
+  suggestion: string;
+  fix: string | null;
+  fix_value: number | null;
+}
+
+export interface QualityReport {
+  score: number;
+  axes: Record<string, number>;
+  issues: QualityIssue[];
+  strengths: string[];
+  summary: string;
+  checked_by: string;
+}
+
+export interface AppliedImprovement {
+  scene_index: number | null;
+  what: string;
+  before: string;
+  after: string;
+  reason: string;
+}
+
+export interface ImprovementReport {
+  applied: AppliedImprovement[];
+  skipped: string[];
+  score_before: number;
+  score_after: number;
+}
+
+export interface RoleAssignment {
+  id: string;
+  label: string;
+  purpose: string;
+  provider: string;
+  model: string | null;
+  ready: boolean;
+  status: string;
+  detail: string;
+  remedy: string[];
+}
+
+export interface LMModel {
+  id: string;
+  state: "loaded" | "downloaded" | "unknown";
+  kind: string;
+  quantization: string;
+  max_context_length: number | null;
+  publisher: string;
+  arch: string;
+  chat_capable: boolean;
+  tier_label: string | null;
+  recommended: boolean;
+  size_gb: number | null;
+  speed_label: string;
+}
+
+export interface ModelPlan {
+  roles: RoleAssignment[];
+  llm_ready: boolean;
+  llm_model: string | null;
+  llm_model_source: string;
+  llm_error_code: string;
+  available_models: LMModel[];
+  blocking: string[];
+  warnings: string[];
+}
+
+export interface ProductionRun {
+  id: string;
+  project_id: string;
+  mode: "full_auto" | "co_creation";
+  status: RunStatus;
+  phase: string;
+  phase_label: string;
+  task: string;
+  progress: number;
+  instruction: string;
+  target_duration_seconds: number;
+  orientation: string;
+  completed_phases: string[];
+  resume_phase: string | null;
+  render_job_id: string | null;
+  output_path: string | null;
+  error: string | null;
+  error_detail: Diagnosis | null;
+  research: ResearchResult | null;
+  strategy: ProductionStrategy | null;
+  quality: QualityReport | null;
+  improvement: ImprovementReport | null;
+  model_plan: ModelPlan | null;
+  scene_count: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ChangePreview {
+  what: string;
+  before: string;
+  after: string;
+  reason: string;
+}
+
+export interface ChangeProposal {
+  id: string;
+  summary: string;
+  reason: string;
+  status: "pending" | "applied" | "cancelled" | "undone" | "failed";
+  preview: ChangePreview[];
+  created_at: string | null;
+}
+
+export interface ChatMessageT {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  proposal: ChangeProposal | null;
+  created_at: string | null;
+}
+
+export interface QuickAction {
+  id: string;
+  label: string;
+  instruction: string;
+}
+
+export interface ApplyResult {
+  applied: string[];
+  skipped: string[];
+  rebuilt_scenes: number[];
+  total_seconds: number;
 }

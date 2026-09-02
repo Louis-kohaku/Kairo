@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_project_or_404
@@ -32,6 +32,45 @@ class SceneOut(BaseModel):
     visual_prompt: str
     estimated_duration: float
     status: str
+    # Short-form scene design (see app/models/production.py).
+    purpose: str = ""
+    emotion: str = ""
+    camera: str = ""
+    subtitle_text: str = ""
+    sfx: str = ""
+    transition: str = "cut"
+    continuity: str = ""
+    asset_source: str = "auto"
+    user_asset_id: Optional[str] = None
+    media_asset_id: Optional[str] = None
+    narration_duration: Optional[float] = None
+    start_time: float = 0.0
+    is_hook: bool = False
+
+    # These columns were added to an existing table, so every scene planned
+    # before they existed holds SQL NULL in them. A pydantic default only
+    # applies when a field is *absent*, never when it is present-and-None,
+    # so without this the production endpoint fails outright on any older
+    # project. Coercing here (rather than backfilling the table) also keeps
+    # working if a future column is added the same way.
+    @field_validator(
+        "purpose",
+        "emotion",
+        "camera",
+        "subtitle_text",
+        "sfx",
+        "transition",
+        "continuity",
+        "asset_source",
+        "start_time",
+        "is_hook",
+        mode="before",
+    )
+    @classmethod
+    def _default_when_null(cls, value, info):
+        if value is None:
+            return cls.model_fields[info.field_name].default
+        return value
 
 
 class ChapterOut(BaseModel):
@@ -66,6 +105,14 @@ class SceneUpdate(BaseModel):
     visual_prompt: Optional[str] = None
     estimated_duration: Optional[float] = None
     status: Optional[str] = None
+    subtitle_text: Optional[str] = None
+    emotion: Optional[str] = None
+    camera: Optional[str] = None
+    purpose: Optional[str] = None
+    sfx: Optional[str] = None
+    transition: Optional[str] = None
+    asset_source: Optional[str] = None
+    user_asset_id: Optional[str] = None
 
 
 @router.post("/projects/{project_id}/produce", response_model=JobOut)
@@ -94,7 +141,21 @@ def update_scene(scene_id: str, payload: SceneUpdate, db: Session = Depends(get_
     scene = db.get(Scene, scene_id)
     if scene is None:
         raise HTTPException(status_code=404, detail="Scene not found")
-    for field in ("narration", "visual_type", "visual_prompt", "estimated_duration", "status"):
+    for field in (
+        "narration",
+        "visual_type",
+        "visual_prompt",
+        "estimated_duration",
+        "status",
+        "subtitle_text",
+        "emotion",
+        "camera",
+        "purpose",
+        "sfx",
+        "transition",
+        "asset_source",
+        "user_asset_id",
+    ):
         value = getattr(payload, field)
         if value is not None:
             setattr(scene, field, value)

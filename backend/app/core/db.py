@@ -35,6 +35,7 @@ def init_db() -> None:
         perf_record,
         production,
         project,
+        studio,
         subtitle,
         timeline,
     )
@@ -51,6 +52,28 @@ def init_db() -> None:
 _NEW_COLUMNS = {
     "jobs": [("error_detail", "TEXT"), ("step", "TEXT")],
     "generations": [("error_detail", "TEXT")],
+    # Short-form scene design (design doc section 20): a scene stopped
+    # being "narration + a visual prompt" once the pipeline had to
+    # actually produce, time and assemble it, so each of these carries one
+    # decision a later stage needs to make. All nullable/defaulted, so
+    # projects planned before this existed still load.
+    "scenes": [
+        ("purpose", "TEXT"),
+        ("emotion", "TEXT"),
+        ("camera", "TEXT"),
+        ("subtitle_text", "TEXT"),
+        ("sfx", "TEXT"),
+        ("bgm_cue", "TEXT"),
+        ("transition", "TEXT"),
+        ("continuity", "TEXT"),
+        ("asset_source", "TEXT"),
+        ("user_asset_id", "TEXT"),
+        ("media_asset_id", "TEXT"),
+        ("narration_asset_id", "TEXT"),
+        ("narration_duration", "REAL"),
+        ("start_time", "REAL"),
+        ("is_hook", "INTEGER"),
+    ],
 }
 
 

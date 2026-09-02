@@ -37,7 +37,12 @@ class TTSSettings(BaseModel):
 class SubtitleSettings(BaseModel):
     enabled: bool = True
     font: str = "Yu Gothic UI"
-    size: int = 42
+    # Real output pixels (the em size of the caption), because the render
+    # pipeline burns subtitles from an ASS whose PlayRes matches the frame -
+    # see services/subtitle_style.py. 88 is what a 1080x1920 short wants:
+    # legible at thumbnail size, ~10 Japanese characters per line, so a
+    # 16-character caption becomes the two punchy lines the format expects.
+    size: int = 88
     position: SubtitlePosition = "bottom"
     color: str = "#FFFFFF"
     style: SubtitleStyle = "outline"

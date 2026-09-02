@@ -74,7 +74,12 @@ LLM_BASE_URL = os.environ.get("KAIRO_LLM_BASE_URL", "http://localhost:1234/v1")
 # default that happens to work with LM Studio's lenient dispatch used to
 # mask real misconfiguration instead of surfacing it.
 LLM_MODEL_ENV = os.environ.get("KAIRO_LLM_MODEL", "").strip() or None
-LLM_TIMEOUT = float(os.environ.get("KAIRO_LLM_TIMEOUT", "120"))
+# Generous by default: a 7B model on a CPU/iGPU machine (this project's
+# target) regularly takes several minutes for a full scene-design reply,
+# and a timeout there is indistinguishable to the user from a hang - the
+# run just fails partway through. Lower it only if you are running on a
+# fast discrete GPU and want failures surfaced sooner.
+LLM_TIMEOUT = float(os.environ.get("KAIRO_LLM_TIMEOUT", "600"))
 LLM_MAX_OPERATIONS = 10
 
 

@@ -1,7 +1,17 @@
 import type {
+  ApplyResult,
   AppSettings,
   AppSettingsPatch,
+  ChangeProposal,
+  ChatMessageT,
   Clip,
+  ModelPlan,
+  Phase,
+  ProductionEvent,
+  ProductionRun,
+  QualityReport,
+  QuickAction,
+  ImprovementReport as ImprovementReportT,
   EngineCapabilities,
   EstimateOut,
   Generation,
@@ -201,7 +211,22 @@ export const api = {
   updateScene: (
     sceneId: string,
     patch: Partial<
-      Pick<Scene, "narration" | "visual_type" | "visual_prompt" | "estimated_duration" | "status">
+      Pick<
+        Scene,
+        | "narration"
+        | "visual_type"
+        | "visual_prompt"
+        | "estimated_duration"
+        | "status"
+        | "subtitle_text"
+        | "emotion"
+        | "camera"
+        | "purpose"
+        | "sfx"
+        | "transition"
+        | "asset_source"
+        | "user_asset_id"
+      >
     >,
   ) =>
     request<Scene>(`/api/scenes/${sceneId}`, {
@@ -279,6 +304,109 @@ export const api = {
     request<ParallelismWarning>(`/api/ai/parallelism-check?value=${value}`),
 
   getTtsVoices: () => request<TTSVoicesOut>("/api/ai/tts-voices"),
+
+  // ---- AI Production Studio ----
+
+  listPhases: () => request<{ phases: Phase[] }>("/api/studio/phases").then((r) => r.phases),
+
+  listQuickActions: () =>
+    request<{ actions: QuickAction[] }>("/api/studio/quick-actions").then((r) => r.actions),
+
+  startStudioRun: (
+    projectId: string,
+    opts: {
+      instruction: string;
+      targetDurationSeconds: number;
+      orientation: string;
+      mode?: "full_auto" | "co_creation";
+    },
+  ) =>
+    request<ProductionRun>(`/api/projects/${projectId}/studio/start`, {
+      method: "POST",
+      body: JSON.stringify({
+        instruction: opts.instruction,
+        target_duration_seconds: opts.targetDurationSeconds,
+        orientation: opts.orientation,
+        mode: opts.mode ?? "full_auto",
+      }),
+    }),
+
+  getStudioRun: (projectId: string) =>
+    request<{ run: ProductionRun | null; phases: Phase[] }>(
+      `/api/projects/${projectId}/studio/run`,
+    ),
+
+  // `wait` turns this into a long poll: the backend holds the request open
+  // until something happens, so a phase change shows up immediately
+  // instead of on the next tick.
+  getRunEvents: (runId: string, afterSeq: number, wait = false) =>
+    request<{ events: ProductionEvent[] }>(
+      `/api/runs/${runId}/events?after_seq=${afterSeq}&wait=${wait}`,
+    ).then((r) => r.events),
+
+  pauseRun: (runId: string) =>
+    request<ProductionRun>(`/api/runs/${runId}/pause`, { method: "POST" }),
+
+  resumeRun: (runId: string) =>
+    request<ProductionRun>(`/api/runs/${runId}/resume`, { method: "POST" }),
+
+  stopRun: (runId: string) =>
+    request<ProductionRun>(`/api/runs/${runId}/stop`, { method: "POST" }),
+
+  getModelPlan: () => request<ModelPlan>("/api/ai/model-plan"),
+
+  loadModel: (modelId: string) =>
+    request<{ ok: boolean; detail: string }>("/api/ai/models/load", {
+      method: "POST",
+      body: JSON.stringify({ model_id: modelId }),
+    }),
+
+  getModelDownloadInstructions: (modelId: string) =>
+    request<{
+      model_id: string;
+      display_name: string;
+      approx_size_gb: number | null;
+      purpose: string;
+      command: string;
+      steps: string[];
+      note: string;
+    }>(`/api/ai/models/download-instructions?model_id=${encodeURIComponent(modelId)}`),
+
+  getQuality: (projectId: string) =>
+    request<{ report: QualityReport | null; improvement: ImprovementReportT | null }>(
+      `/api/projects/${projectId}/quality`,
+    ),
+
+  runQualityCheck: (projectId: string) =>
+    request<{ report: QualityReport }>(`/api/projects/${projectId}/quality/check`, {
+      method: "POST",
+    }),
+
+  getChat: (projectId: string) =>
+    request<{ messages: ChatMessageT[] }>(`/api/projects/${projectId}/chat`).then(
+      (r) => r.messages,
+    ),
+
+  sendChat: (projectId: string, instruction: string) =>
+    request<{ reply: string; proposal: ChangeProposal | null }>(
+      `/api/projects/${projectId}/chat`,
+      { method: "POST", body: JSON.stringify({ instruction }) },
+    ),
+
+  applyProposal: (proposalId: string) =>
+    request<{ result: ApplyResult; proposal: ChangeProposal }>(
+      `/api/proposals/${proposalId}/apply`,
+      { method: "POST" },
+    ),
+
+  cancelProposal: (proposalId: string) =>
+    request<ChangeProposal>(`/api/proposals/${proposalId}/cancel`, { method: "POST" }),
+
+  undoProposal: (proposalId: string) =>
+    request<{ result: { restored_scenes: number[] }; proposal: ChangeProposal }>(
+      `/api/proposals/${proposalId}/undo`,
+      { method: "POST" },
+    ),
 
   ttsPreview: async (text: string, voiceId: string | null) => {
     const res = await fetch(`${API_BASE}/api/ai/tts-preview`, {

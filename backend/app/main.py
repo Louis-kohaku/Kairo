@@ -13,6 +13,7 @@ from app.api import (
     production,
     projects,
     settings,
+    studio,
     subtitles,
     system,
     timeline,
@@ -48,6 +49,7 @@ app.include_router(generation.router)
 app.include_router(system.router)
 app.include_router(ai.router)
 app.include_router(settings.router)
+app.include_router(studio.router)
 
 
 @app.on_event("startup")

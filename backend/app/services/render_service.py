@@ -20,7 +20,7 @@ from app.models.project import Project
 from app.models.subtitle import SubtitleCue
 from app.models.timeline import Clip, Track
 from app.services import ai_diagnostics, job_log, settings_service, subtitle_style
-from app.services.ffmpeg import engine
+from app.services.ffmpeg import compose, engine
 from app.services.srt import build_srt
 
 logger = logging.getLogger(__name__)
@@ -140,7 +140,19 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False, crf: 
             engine.loop_or_trim_audio(bgm_concat, video_duration, bgm_fitted)
 
             _update_job(job_id, progress=90.0, message="Mixing audio")
-            engine.mix_video_with_bgm(main_video, bgm_fitted, DEFAULT_BGM_VOLUME, pre_subtitle_path)
+            # The BGM clip's own volume is the user's (or the AI's) explicit
+            # choice - honouring it here is what makes "BGMをもう少し下げて"
+            # change the rendered file rather than just a number in the UI.
+            bgm_volume = bgm_clips[0].volume * DEFAULT_BGM_VOLUME
+            # Ducked against the main audio so music steps back under
+            # narration and returns in the gaps (design doc section 26).
+            compose.mix_narration_with_bgm(
+                main_video,
+                bgm_fitted,
+                pre_subtitle_path,
+                bgm_volume=max(0.0, min(bgm_volume, 1.0)),
+                duck=True,
+            )
         else:
             main_video.replace(pre_subtitle_path)
 
@@ -154,10 +166,22 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False, crf: 
             )
             if cues:
                 _update_job(job_id, progress=94.0, message="Burning in subtitles", step=current_step)
-                srt_path = work_dir / "burn.srt"
-                srt_path.write_text(build_srt(cues), encoding="utf-8")
-                force_style = subtitle_style.build_force_style(app_settings.subtitle)
-                engine.burn_subtitles(pre_subtitle_path, srt_path, final_path, force_style, crf=crf)
+                # Burned from an ASS sized to this exact frame, so the
+                # subtitle size in Settings is real output pixels. Handing
+                # ffmpeg an SRT instead makes libass rescale against its
+                # own conversion resolution, which rendered a "42px"
+                # caption at roughly 180px on a 1080x1920 short.
+                ass_path = work_dir / "burn.ass"
+                ass_path.write_text(
+                    subtitle_style.build_ass(
+                        cues, app_settings.subtitle, project.width, project.height
+                    ),
+                    encoding="utf-8",
+                )
+                # The .srt stays alongside it: it is what the user can
+                # download and load into another editor.
+                (work_dir / "burn.srt").write_text(build_srt(cues), encoding="utf-8")
+                engine.burn_subtitles(pre_subtitle_path, ass_path, final_path, crf=crf)
             else:
                 pre_subtitle_path.replace(final_path)
 

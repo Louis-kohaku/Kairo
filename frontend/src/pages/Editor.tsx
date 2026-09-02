@@ -56,10 +56,12 @@ export default function Editor({
   projectId,
   onBack,
   onOpenSettings,
+  onOpenStudio,
 }: {
   projectId: string;
   onBack: () => void;
   onOpenSettings?: () => void;
+  onOpenStudio?: () => void;
 }) {
   const [view, setView] = useState<View>("edit");
   const [initializedView, setInitializedView] = useState(false);
@@ -290,11 +292,12 @@ export default function Editor({
   return (
     <div className="editor-root">
       <div className="editor-topbar">
-        <button onClick={onBack}>&larr; プロジェクト一覧</button>
+        <button onClick={onBack}>&larr; ホーム</button>
         <span className="editor-title">{project?.name ?? "..."}</span>
         {lastSavedAt && <span className="autosave-badge">✓ 自動保存済み</span>}
         <span style={{ flex: 1 }} />
         <LlmStatusBadge />
+        {onOpenStudio && <button onClick={onOpenStudio}>✨ AI制作に戻る</button>}
         <button onClick={() => setShowSystemModal(true)}>📊 PC診断</button>
         {onOpenSettings && <button onClick={onOpenSettings}>⚙ 設定</button>}
       </div>
