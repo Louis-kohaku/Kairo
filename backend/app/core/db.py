@@ -32,6 +32,7 @@ def init_db() -> None:
         generation,
         job,
         media_asset,
+        perf_record,
         production,
         project,
         subtitle,

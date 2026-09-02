@@ -52,7 +52,16 @@ export default function SystemInfoPanel() {
 
         <div className="system-info-card">
           <h3>GPU</h3>
-          <div>{info.gpu.names?.join(", ") ?? "取得できませんでした"}</div>
+          {info.gpu.names ? (
+            info.gpu.names.map((name, i) => (
+              <div key={name}>
+                {name}
+                <div className="generation-engine-reason">{info.gpu.vram_label?.[i] ?? ""}</div>
+              </div>
+            ))
+          ) : (
+            <div>取得できませんでした</div>
+          )}
         </div>
 
         <div className="system-info-card">

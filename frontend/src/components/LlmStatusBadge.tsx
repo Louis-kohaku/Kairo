@@ -28,13 +28,13 @@ function summarize(status: LLMStatus | null): { dot: string; text: string; title
     return {
       dot: "🟢",
       text: "LM Studio: 準備完了",
-      title: `使用モデル: ${status.model}`,
+      title: `使用モデル: ${status.model ?? "(未解決)"}`,
     };
   }
   return {
     dot: "🟡",
     text: `LM Studio: ${UNREADY_LABELS[status.error_code] ?? "未準備"}`,
-    title: `要求モデル: ${status.model} / ロード済み: ${status.models_loaded.join(", ") || "なし"}`,
+    title: `要求モデル: ${status.model ?? "(未解決)"} / ロード済み: ${status.models_loaded.join(", ") || "なし"}`,
   };
 }
 
@@ -54,13 +54,14 @@ export default function LlmStatusBadge({ status: externalStatus, pollIntervalMs 
             setInternalStatus({
               available: false,
               base_url: "",
-              model: "",
+              model: null,
               server_reachable: false,
               api_ok: false,
               models_loaded: [],
               configured_model_loaded: false,
               can_generate: false,
-              is_placeholder_model: false,
+              model_source: "none",
+              resolution_reason: "",
               error_code: "LM_STUDIO_CONNECTION_FAILED",
               ready: false,
               diagnosis: null,

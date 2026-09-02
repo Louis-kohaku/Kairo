@@ -18,9 +18,11 @@ import { formatTime } from "../utils/format";
 export default function Editor({
   projectId,
   onBack,
+  onOpenSettings,
 }: {
   projectId: string;
   onBack: () => void;
+  onOpenSettings?: () => void;
 }) {
   const [mode, setMode] = useState<"edit" | "production" | "generate" | "system">("edit");
   const [project, setProject] = useState<Project | null>(null);
@@ -173,6 +175,7 @@ export default function Editor({
         </div>
         <span style={{ flex: 1 }} />
         <LlmStatusBadge />
+        {onOpenSettings && <button onClick={onOpenSettings}>⚙ 設定</button>}
         {mode === "edit" && (
           <RenderPanel
             projectId={projectId}

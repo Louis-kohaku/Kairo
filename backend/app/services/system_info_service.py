@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 
-from app.core.config import DATA_ROOT, LLM_BASE_URL, LLM_MODEL
+from app.core.config import DATA_ROOT, LLM_BASE_URL
 from app.services import llm_client, video_engines
 
 
@@ -55,9 +55,29 @@ def get_disk_info() -> dict:
     }
 
 
+# Name substrings that indicate an integrated GPU (shares system RAM as
+# "VRAM" rather than having dedicated memory) - used to decide whether a
+# model recommendation should assume real dedicated VRAM is available
+# (design doc section 7/9: never hardcode a single PC's GPU, just classify
+# what's actually detected).
+_INTEGRATED_GPU_MARKERS = (
+    "intel", "uhd graphics", "iris", "microsoft basic render",
+    "amd radeon(tm) graphics", "apple m",
+)
+
+
+def _is_integrated_gpu_name(name: str) -> bool:
+    low = name.lower()
+    if "nvidia" in low or "geforce" in low or "quadro" in low:
+        return False
+    if "radeon rx" in low or "radeon pro" in low:
+        return False
+    return any(marker in low for marker in _INTEGRATED_GPU_MARKERS)
+
+
 def get_gpu_info() -> dict:
     if platform.system() != "Windows":
-        return {"names": None, "note": "Windows以外は未対応(手動確認してください)"}
+        return {"names": None, "dedicated": None, "vram_label": None, "note": "Windows以外は未対応(手動確認してください)"}
     out = _run(
         [
             "powershell",
@@ -67,7 +87,18 @@ def get_gpu_info() -> dict:
         ]
     )
     names = [line.strip() for line in out.splitlines() if line.strip()] if out else []
-    return {"names": names or None}
+    dedicated = [not _is_integrated_gpu_name(n) for n in names] if names else None
+    # Windows commonly reports an unreliable/capped AdapterRAM value for
+    # modern GPUs (both integrated and some discrete), so an exact VRAM
+    # figure is deliberately not surfaced here - only whether memory is
+    # shared with system RAM (integrated) or dedicated (discrete, exact
+    # amount to be confirmed via GPU vendor tools) is reported, per the
+    # written policy of never presenting a guess as more certain than it is.
+    vram_label = [
+        "共有 (システムRAMと共有)" if not d else "専用VRAM (正確な容量は要OS/GPU設定確認)"
+        for d in (dedicated or [])
+    ] if names else None
+    return {"names": names or None, "dedicated": dedicated, "vram_label": vram_label}
 
 
 def get_ffmpeg_info() -> dict:
@@ -243,7 +274,7 @@ def get_system_report() -> dict:
                 "id": "llm",
                 "label": "LLM (企画・台本生成 / AI編集)",
                 "provider": "LM Studio",
-                "model": LLM_MODEL,
+                "model": llm_status.configured_model,
                 "ready": llm_status.can_generate,
                 "detail": (
                     f"ロード済みモデル: {', '.join(llm_status.models_loaded)}"

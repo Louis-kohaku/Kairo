@@ -281,7 +281,7 @@ Copy-Item frontend/.env.example frontend/.env
 |---|---|---|
 | `KAIRO_DATA_ROOT` | `<リポジトリルート>/data` | 動画・DB・ログの保存先ディレクトリ |
 | `KAIRO_LLM_BASE_URL` | `http://localhost:1234/v1` | LM Studio (OpenAI互換API) のベースURL |
-| `KAIRO_LLM_MODEL` | `local-model` | LM Studioに渡すモデル名 |
+| `KAIRO_LLM_MODEL` | (未設定=自動検出) | LM Studioに渡すモデル名。未設定の場合、Kairoが起動時にLM Studioの`/v1/models`から利用可能なモデルを自動検出し、PC性能に応じて推奨されるモデルを自動選択します（Kairo UIの「設定 > AI」からAuto/Manualの切り替え・モデル変更も可能）。 |
 | `KAIRO_LLM_TIMEOUT` | `120` | LLMリクエストのタイムアウト秒数 |
 | `KAIRO_WHISPER_MODEL` | `small` | faster-whisperのモデルサイズ (`tiny`/`base`/`small`/`medium`/`large-v3`) |
 | `KAIRO_WHISPER_DEVICE` | `cpu` | 文字起こしの実行デバイス (`cpu` / `cuda`) |

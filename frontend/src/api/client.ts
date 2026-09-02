@@ -1,18 +1,24 @@
 import type {
+  AppSettings,
+  AppSettingsPatch,
   Clip,
   EngineCapabilities,
+  EstimateOut,
   Generation,
   Job,
   LLMStatus,
   MediaAsset,
+  ModelsListOut,
   Project,
   ProductionData,
+  RecommendationOut,
   Scene,
   Segment,
   SilenceCutPlan,
   SubtitleCue,
   SystemInfo,
   Timeline,
+  VideoSettingWarning,
 } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8756";
@@ -230,4 +236,25 @@ export const api = {
     request<Generation[]>(`/api/projects/${projectId}/generations`),
 
   getSystemInfo: () => request<SystemInfo>("/api/system/info"),
+
+  getSettings: () => request<AppSettings>("/api/settings"),
+
+  updateSettings: (patch: AppSettingsPatch) =>
+    request<AppSettings>("/api/settings", { method: "PUT", body: JSON.stringify(patch) }),
+
+  resetSettings: () => request<AppSettings>("/api/settings/reset", { method: "POST" }),
+
+  getAiModels: () => request<ModelsListOut>("/api/ai/models"),
+
+  getAiRecommendation: () => request<RecommendationOut>("/api/ai/recommendation"),
+
+  checkVideoSetting: (width: number, height: number, fps: number) =>
+    request<VideoSettingWarning>(
+      `/api/ai/video-setting-check?width=${width}&height=${height}&fps=${fps}`,
+    ),
+
+  getEstimate: (durationSeconds: number, qualityPreset: string) =>
+    request<EstimateOut>(
+      `/api/ai/estimate?duration_seconds=${durationSeconds}&quality_preset=${qualityPreset}`,
+    ),
 };

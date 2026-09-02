@@ -8,10 +8,11 @@ keeping the "LLM backend is swappable" requirement intact.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import requests
 
-from app.core.config import LLM_BASE_URL, LLM_MODEL, LLM_TIMEOUT
+from app.core.config import LLM_BASE_URL, LLM_MODEL_ENV, LLM_TIMEOUT
 
 
 class LLMUnavailableError(RuntimeError):
@@ -23,25 +24,96 @@ class LLMResponseError(RuntimeError):
 
 
 # Error codes a preflight check classifies LM Studio's state into. "OK"
-# means the app's configured model was actually found among the models
-# LM Studio currently has loaded - anything else means a chat completion
-# would very likely fail, and the specific code tells the user why instead
-# of a single generic "モデルがロードされていません" message.
+# means the resolved model was actually found among the models LM Studio
+# currently has loaded - anything else means a chat completion would very
+# likely fail, and the specific code tells the user why instead of a single
+# generic "モデルがロードされていません" message.
 ERROR_CONNECTION_FAILED = "LM_STUDIO_CONNECTION_FAILED"
 ERROR_MODELS_FETCH_FAILED = "MODELS_FETCH_FAILED"
 ERROR_MODEL_NOT_LOADED = "MODEL_NOT_LOADED"
 ERROR_MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
-ERROR_MODEL_ID_MISMATCH = "MODEL_ID_MISMATCH"
 ERROR_OK = "OK"
 
-# Values KAIRO_LLM_MODEL is known to take as a stand-in rather than a real
-# LM Studio model id - e.g. this app's own shipped default. Never reported
-# to the user as if it were an actual model LM Studio should have loaded.
-PLACEHOLDER_MODEL_NAMES = {"local-model", "default", "placeholder", ""}
+ModelSource = Literal["env", "user", "auto", "fallback", "none"]
 
 
-def is_placeholder_model(model_id: str) -> bool:
-    return model_id.strip().lower() in PLACEHOLDER_MODEL_NAMES
+@dataclass
+class ResolvedModel:
+    model_id: str | None
+    source: ModelSource
+    reason: str
+
+
+# Substrings identifying embedding/reranker models, which are commonly kept
+# loaded in LM Studio alongside a chat model (e.g. for RAG) but cannot serve
+# chat completions. Auto/fallback selection must never pick one of these as
+# "the model" - an explicit env/Manual choice is left alone since that is
+# the user's deliberate pick, not Kairo guessing.
+_NON_CHAT_MODEL_MARKERS = ("embed", "rerank", "bge-", "gte-", "e5-small", "e5-large", "e5-base")
+
+
+def _is_chat_capable(model_id: str) -> bool:
+    low = model_id.lower()
+    return not any(marker in low for marker in _NON_CHAT_MODEL_MARKERS)
+
+
+def resolve_model(available_models: list[str]) -> ResolvedModel:
+    """Model selection priority (design doc section 4): explicit env var ->
+    user's Manual choice (persisted in settings) -> PC-based Auto
+    recommendation -> first model LM Studio actually has loaded. Never
+    falls back to a fake placeholder id like the old "local-model" default -
+    `source="none"` means there is genuinely nothing usable yet, and the
+    caller (get_status) is responsible for surfacing that clearly."""
+    if LLM_MODEL_ENV:
+        if LLM_MODEL_ENV in available_models:
+            return ResolvedModel(LLM_MODEL_ENV, "env", "環境変数 KAIRO_LLM_MODEL で指定されたモデルです。")
+        return ResolvedModel(
+            LLM_MODEL_ENV, "env",
+            "環境変数 KAIRO_LLM_MODEL で指定されていますが、LM Studioには見つかりません。",
+        )
+
+    # Deferred imports: settings_service/ai_recommendation_service sit
+    # "above" llm_client in the dependency graph (ai_recommendation_service
+    # -> system_info_service -> llm_client), so importing them at module
+    # load time would create a circular import. By call time every module
+    # involved has already finished loading.
+    from app.services import settings_service
+
+    settings = settings_service.get_settings()
+    if settings.ai.mode == "manual" and settings.ai.selected_model:
+        chosen = settings.ai.selected_model
+        if chosen in available_models:
+            return ResolvedModel(chosen, "user", "設定でManual選択されたモデルです。")
+        return ResolvedModel(
+            chosen, "user", "設定でManual選択されていますが、LM Studioには見つかりません。"
+        )
+
+    chat_models = [m for m in available_models if _is_chat_capable(m)]
+
+    if chat_models:
+        from app.services import ai_recommendation_service
+
+        rec = ai_recommendation_service.recommend_model(chat_models)
+        if rec.get("recommended_model_id"):
+            return ResolvedModel(rec["recommended_model_id"], "auto", "; ".join(rec["reasons"]))
+        return ResolvedModel(
+            chat_models[0],
+            "fallback",
+            "PC性能に適した既知のモデルとは一致しませんでしたが、"
+            "LM Studioにロードされているモデルを使用します。",
+        )
+
+    if available_models:
+        # Only embedding/reranker models are loaded - nothing here can serve
+        # a chat completion, so this is reported the same as "no model" is,
+        # rather than silently handing chat requests to an embedding model.
+        return ResolvedModel(
+            None, "none",
+            "LM Studioにはモデルがロードされていますが、チャット生成に使えるモデルがありません"
+            "(埋め込み/リランク用モデルのみ検出されました)。",
+        )
+
+    return ResolvedModel(None, "none", "LM Studioに利用可能なモデルがありません。")
 
 
 @dataclass
@@ -53,21 +125,22 @@ class LLMStatus:
     two flags rather than inferred from them.
 
     `error_code`/`ready` go one step further: they classify *why*
-    generation would (or wouldn't) succeed with the app's *specific*
-    configured model, so the UI never has to guess from a generic error.
-    `can_generate` is kept as the looser "is any model loaded at all"
-    signal used by places (system info, the status badge) that only care
-    about the LLM pipeline in general, not this exact model id.
+    generation would (or wouldn't) succeed with the *resolved* model (see
+    `resolve_model`), so the UI never has to guess from a generic error.
+    `model_source`/`resolution_reason` say *how* that model was chosen
+    (env override / user's Manual pick / Auto recommendation / fallback),
+    which is what the AI settings UI's "なぜ？" explanation is built from.
     """
 
     server_reachable: bool
     api_ok: bool
     models_loaded: list[str] = field(default_factory=list)
-    configured_model: str = LLM_MODEL
+    configured_model: str | None = None
     configured_model_loaded: bool = False
+    model_source: ModelSource = "none"
+    resolution_reason: str = ""
     can_generate: bool = False
     base_url: str = LLM_BASE_URL
-    is_placeholder_model: bool = False
     error_code: str = ERROR_CONNECTION_FAILED
     ready: bool = False
     connection_error: str | None = None
@@ -82,15 +155,12 @@ def is_available() -> bool:
 
 
 def get_status() -> LLMStatus:
-    placeholder = is_placeholder_model(LLM_MODEL)
-
     try:
         resp = requests.get(f"{LLM_BASE_URL.rstrip('/')}/models", timeout=3)
     except requests.RequestException as exc:
         return LLMStatus(
             server_reachable=False,
             api_ok=False,
-            is_placeholder_model=placeholder,
             error_code=ERROR_CONNECTION_FAILED,
             connection_error=str(exc),
         )
@@ -99,7 +169,6 @@ def get_status() -> LLMStatus:
         return LLMStatus(
             server_reachable=True,
             api_ok=False,
-            is_placeholder_model=placeholder,
             error_code=ERROR_MODELS_FETCH_FAILED,
             connection_error=f"/models がHTTP {resp.status_code} を返しました",
         )
@@ -111,35 +180,41 @@ def get_status() -> LLMStatus:
         return LLMStatus(
             server_reachable=True,
             api_ok=False,
-            is_placeholder_model=placeholder,
             error_code=ERROR_MODELS_FETCH_FAILED,
             connection_error=f"/models の応答を解釈できませんでした: {exc}",
         )
 
-    configured_model_loaded = LLM_MODEL in models_loaded
+    resolved = resolve_model(models_loaded)
 
-    if not models_loaded:
-        error_code = ERROR_MODEL_NOT_LOADED
-    elif configured_model_loaded:
-        error_code = ERROR_OK
-    elif placeholder:
-        error_code = ERROR_MODEL_ID_MISMATCH
-    else:
-        error_code = ERROR_MODEL_NOT_FOUND
+    if not models_loaded or resolved.model_id is None:
+        # Either nothing is loaded at all, or only non-chat models
+        # (embedding/reranker) are - either way nothing can currently serve
+        # a chat completion, which is what ERROR_MODEL_NOT_LOADED means to
+        # the UI (see resolve_model's _is_chat_capable filtering).
+        return LLMStatus(
+            server_reachable=True,
+            api_ok=True,
+            models_loaded=models_loaded,
+            configured_model=resolved.model_id,
+            model_source=resolved.source,
+            resolution_reason=resolved.reason,
+            can_generate=False,
+            error_code=ERROR_MODEL_NOT_LOADED,
+            ready=False,
+        )
+
+    configured_model_loaded = resolved.model_id in models_loaded
+    error_code = ERROR_OK if configured_model_loaded else ERROR_MODEL_NOT_FOUND
 
     return LLMStatus(
         server_reachable=True,
         api_ok=True,
         models_loaded=models_loaded,
+        configured_model=resolved.model_id,
         configured_model_loaded=configured_model_loaded,
-        # Loose gate, kept only for the general "is the LLM pipeline usable
-        # at all" signal: LM Studio dispatches to whatever is loaded even
-        # when the "model" field doesn't match exactly, so "some model is
-        # loaded" alone can still mean *some* chat completion would work.
-        # `ready` below is the strict gate for "this app's configured
-        # model specifically will work" and is what preflight checks use.
-        can_generate=len(models_loaded) > 0,
-        is_placeholder_model=placeholder,
+        model_source=resolved.source,
+        resolution_reason=resolved.reason,
+        can_generate=True,
         error_code=error_code,
         ready=error_code == ERROR_OK,
     )
@@ -156,8 +231,14 @@ class LLMNotReadyError(RuntimeError):
 
 
 def chat_completion(messages: list[dict], temperature: float = 0.2) -> str:
+    # Resolved fresh on every call (not a module-level constant) so a model
+    # switched in LM Studio, or an AI setting changed in Kairo's UI, takes
+    # effect on the very next request without a restart.
+    status = get_status()
+    model_id = status.configured_model or ""
+
     url = f"{LLM_BASE_URL.rstrip('/')}/chat/completions"
-    payload = {"model": LLM_MODEL, "messages": messages, "temperature": temperature}
+    payload = {"model": model_id, "messages": messages, "temperature": temperature}
 
     try:
         resp = requests.post(url, json=payload, timeout=LLM_TIMEOUT)

@@ -32,7 +32,11 @@ def run_check(log_lines: list[str]) -> llm_client.LLMStatus:
         return status
 
     log_lines.append(job_log.timestamp_line(f"[LM_STUDIO] Available models: {len(status.models_loaded)}"))
-    log_lines.append(job_log.timestamp_line(f"[LM_STUDIO] Requested model: {status.configured_model}"))
+    log_lines.append(
+        job_log.timestamp_line(
+            f"[LM_STUDIO] Resolved model: {status.configured_model or '(none)'} (source: {status.model_source})"
+        )
+    )
     log_lines.append(
         job_log.timestamp_line(
             f"[LM_STUDIO] Requested model found: {'YES' if status.configured_model_loaded else 'NO'}"

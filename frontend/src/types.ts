@@ -182,7 +182,7 @@ export interface AIContext {
   endpoint: string;
   model_status: string;
   requested_model: string;
-  is_placeholder_model: boolean;
+  model_source: string;
   models_loaded: string[];
   connection_status: string;
   error_code: string;
@@ -203,16 +203,19 @@ export interface Diagnosis {
   error_code: string;
 }
 
+export type ModelSource = "env" | "user" | "auto" | "fallback" | "none";
+
 export interface LLMStatus {
   available: boolean;
   base_url: string;
-  model: string;
+  model: string | null;
   server_reachable: boolean;
   api_ok: boolean;
   models_loaded: string[];
   configured_model_loaded: boolean;
   can_generate: boolean;
-  is_placeholder_model: boolean;
+  model_source: ModelSource;
+  resolution_reason: string;
   error_code: string;
   ready: boolean;
   diagnosis: Diagnosis | null;
@@ -228,7 +231,7 @@ export interface SystemInfo {
   cpu: { name: string; physical_cores: number | null; logical_cores: number | null };
   ram: { total_gb: number; available_gb: number; used_percent: number };
   disk: { total_gb: number; free_gb: number; data_root: string };
-  gpu: { names: string[] | null; note?: string };
+  gpu: { names: string[] | null; dedicated: boolean[] | null; vram_label: string[] | null; note?: string };
   ffmpeg: { available: boolean; path: string | null; version: string | null };
   os: { name: string; version: string; release: string };
   ai_runtime: {
@@ -274,4 +277,112 @@ export interface Job {
   output_path: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// ---- Settings (design doc sections 12/30-32/38-40) ----
+
+export type AIMode = "auto" | "manual";
+export type QualityPreset = "fast" | "standard" | "high" | "ultra" | "custom";
+export type PerformanceProfile = "auto" | "speed" | "balanced" | "quality" | "custom";
+
+export interface AISettingsT {
+  mode: AIMode;
+  selected_model: string | null;
+}
+
+export interface VideoSettingsT {
+  aspect_ratio: string;
+  width: number;
+  height: number;
+  fps: number;
+  quality_preset: QualityPreset;
+  duration_seconds: number;
+}
+
+export interface PerformanceCustomOverrides {
+  width: number | null;
+  height: number | null;
+  fps: number | null;
+  num_inference_steps: number | null;
+}
+
+export interface PerformanceSettingsT {
+  profile: PerformanceProfile;
+  custom: PerformanceCustomOverrides | null;
+}
+
+export interface AppSettings {
+  ai: AISettingsT;
+  video: VideoSettingsT;
+  performance: PerformanceSettingsT;
+}
+
+export interface AppSettingsPatch {
+  ai?: Partial<AISettingsT> & { clear_selected_model?: boolean };
+  video?: Partial<VideoSettingsT>;
+  performance?: Partial<PerformanceSettingsT>;
+}
+
+// ---- AI model management (design doc sections 3-20) ----
+
+export interface ModelInfo {
+  id: string;
+  loaded: boolean;
+  recommended: boolean;
+  catalog_tier_label: string | null;
+  is_current: boolean;
+}
+
+export interface ModelsListOut {
+  connected: boolean;
+  base_url: string;
+  models: ModelInfo[];
+  current_model: string | null;
+  current_model_source: string | null;
+  diagnosis: Diagnosis | null;
+}
+
+export interface SetupCandidate {
+  id: string;
+  display_name: string;
+  purpose: string;
+  size_gb: number;
+  quant: string;
+  tier_label: string;
+  required_free_gb: number;
+  current_free_gb: number;
+  enough_disk_space: boolean;
+  estimated_download_minutes_low: number;
+  estimated_download_minutes_high: number;
+  recommendation_stars: number;
+  already_available: boolean;
+}
+
+export interface RecommendationOut {
+  ram_gb: number;
+  gpu_names: string[];
+  gpu_dedicated: boolean;
+  recommended_tier_label: string;
+  reasons: string[];
+  recommended_model_id: string | null;
+  recommended_model_source: "existing" | "catalog" | "none";
+  setup_candidates: SetupCandidate[];
+}
+
+export interface EstimateRange {
+  low_seconds: number;
+  high_seconds: number;
+}
+
+export interface EstimateOut {
+  planning: EstimateRange;
+  generation: EstimateRange;
+  total: EstimateRange;
+  based_on_history: boolean;
+  note: string;
+}
+
+export interface VideoSettingWarning {
+  level: "recommended" | "caution" | "not_recommended";
+  reason: string;
 }

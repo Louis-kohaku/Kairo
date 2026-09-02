@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import type { LLMStatus } from "../types";
+import { MODEL_SOURCE_LABELS } from "../utils/format";
 import AIErrorPanel from "./AIErrorPanel";
 
 interface Props {
@@ -65,8 +66,8 @@ export default function LlmModelCheckPanel({ onChecked }: Props) {
           <div className="llm-model-check-row">
             <span className="llm-model-check-label">Selected Model</span>
             <span className={status.ready ? "ok" : "bad"}>
-              {status.ready ? "✓" : "✗"} {status.model}
-              {status.is_placeholder_model ? "(未設定・アプリの既定値)" : ""}
+              {status.ready ? "✓" : "✗"} {status.model ?? "(未解決)"}
+              {status.model_source ? ` (${MODEL_SOURCE_LABELS[status.model_source] ?? status.model_source})` : ""}
             </span>
           </div>
 

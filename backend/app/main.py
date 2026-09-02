@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import (
+    ai,
     ai_edit,
     cut,
     generation,
@@ -11,6 +12,7 @@ from app.api import (
     media,
     production,
     projects,
+    settings,
     subtitles,
     system,
     timeline,
@@ -38,6 +40,8 @@ app.include_router(ai_edit.router)
 app.include_router(production.router)
 app.include_router(generation.router)
 app.include_router(system.router)
+app.include_router(ai.router)
+app.include_router(settings.router)
 
 
 @app.on_event("startup")

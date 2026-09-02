@@ -16,7 +16,7 @@ from app.core.paths import assets_dir
 from app.models.generation import Generation
 from app.models.job import Job
 from app.models.media_asset import MediaAsset
-from app.services import ai_diagnostics, job_log, video_engines
+from app.services import ai_diagnostics, job_log, time_estimate_service, video_engines
 from app.services.ffmpeg.probe import probe_media
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,18 @@ def run_image_to_video(project_id: str, job_id: str, generation_id: str) -> None
         generation.output_media_asset_id = asset.id
         generation.elapsed_seconds = result.elapsed_seconds
         db.commit()
+
+        try:
+            time_estimate_service.record_generation(
+                engine_id=generation.engine_id,
+                width=result.width,
+                height=result.height,
+                num_frames=params.get("num_frames", 0),
+                fps=result.fps,
+                elapsed_seconds=result.elapsed_seconds,
+            )
+        except Exception:
+            logger.exception("Failed to record perf history for generation %s", generation_id)
 
         _update_job(
             db,

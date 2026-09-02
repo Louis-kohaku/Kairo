@@ -45,7 +45,7 @@ class AIContext:
     # image-to-video generation) so the UI can show "何が要求されていて、
     # LM Studio側に今何があるのか" side by side instead of one vague line.
     requested_model: str = ""
-    is_placeholder_model: bool = False
+    model_source: str = ""
     models_loaded: list[str] = field(default_factory=list)
     connection_status: str = ""
     error_code: str = ""
@@ -147,73 +147,58 @@ def diagnose_llm_status(
             ],
         )
     elif status.error_code == llm_client.ERROR_MODEL_NOT_LOADED:
+        embedding_only = len(available) > 0
         diag = Diagnosis(
-            summary="使用予定のモデルがLM Studioにロードされていません。",
+            summary=(
+                "LM Studioに接続できていますが、チャット生成に使えるモデルがありません。"
+                if embedding_only
+                else "LM Studioに接続できていますが、利用可能なモデルがありません。"
+            ),
             category="model",
             error_code=status.error_code,
             cause_known=True,
             cause=(
-                "LM Studioには接続できていますが、現在ロードされているモデルがありません。"
+                "LM Studioには接続できていますが、ロードされているのは埋め込み/リランク用のモデルのみで、"
+                "チャット生成(企画・台本・編集指示の解釈)に使えるモデルがロードされていません。"
+                if embedding_only
+                else "LM Studioには接続できていますが、現在ロードされているモデルがありません。"
                 "LM Studioでモデルをロードしてください。"
             ),
             facts=[
                 "LM Studioサーバーには接続できました。",
-                "現在ロードされているモデル: なし",
-                f"アプリが要求しているモデル: {status.configured_model}",
+                "現在ロードされているモデル: " + (", ".join(available) if available else "なし"),
             ],
             suggestions=[
-                Suggestion("LM StudioのDeveloper/ServerタブでモデルをLoadする", "recheck_status"),
+                Suggestion("LM StudioのDeveloper/ServerタブでチャットモデルをLoadする", "recheck_status"),
+                Suggestion("AIセットアップ画面で推奨モデルを確認する", "open_ai_setup"),
                 Suggestion("状態を再確認", "recheck_status"),
                 Suggestion("再試行", "retry"),
             ],
         )
     elif status.error_code == llm_client.ERROR_MODEL_NOT_FOUND:
+        via_env = status.model_source == "env"
         diag = Diagnosis(
-            summary="要求されたモデルがLM Studioで見つかりません。",
+            summary="指定されたモデルがLM Studioで利用できません。",
             category="model",
             error_code=status.error_code,
             cause_known=True,
             cause=(
-                f"アプリが要求しているモデル「{status.configured_model}」は、"
-                "現在LM Studioにロードされているモデルの中に見つかりませんでした。"
+                f"{'環境変数 KAIRO_LLM_MODEL で' if via_env else ''}指定されているモデル"
+                f"「{status.configured_model}」は、現在LM Studioにロードされているモデルの中に"
+                "見つかりませんでした。"
             ),
             facts=[
-                f"Requested: {status.configured_model}",
-                "Available: " + (", ".join(available) if available else "(なし)"),
+                f"指定: {status.configured_model}",
+                "利用可能: " + (", ".join(available) if available else "(なし)"),
             ],
-            candidates=[
-                "モデル名の設定(環境変数 KAIRO_LLM_MODEL)が間違っている",
-                "目的のモデルがLM Studioでまだロードされていない",
-            ],
-            suggestions=[
-                Suggestion(
-                    "LM Studioで目的のモデルをロードする、"
-                    "またはアプリの設定を実際にロード中のモデルIDに合わせる",
-                    "recheck_status",
-                ),
-                Suggestion("状態を再確認", "recheck_status"),
-            ],
-        )
-    elif status.error_code == llm_client.ERROR_MODEL_ID_MISMATCH:
-        diag = Diagnosis(
-            summary="アプリが要求しているモデルIDとLM StudioのモデルIDが一致しません。",
-            category="model",
-            error_code=status.error_code,
-            cause_known=True,
-            cause=(
-                f"アプリの設定は既定値のプレースホルダー「{status.configured_model}」のままで、"
-                "実際にLM Studioでロードされているモデルのidに置き換えられていません。"
+            candidates=(
+                ["環境変数 KAIRO_LLM_MODEL のモデル名が間違っている", "目的のモデルがLM Studioでまだロードされていない"]
+                if via_env
+                else ["設定したモデルがLM Studioでアンロードされた", "目的のモデルがLM Studioでまだロードされていない"]
             ),
-            facts=[
-                f"Application: {status.configured_model}",
-                "LM Studio: " + (", ".join(available) if available else "(なし)"),
-            ],
             suggestions=[
-                Suggestion(
-                    "環境変数 KAIRO_LLM_MODEL を、LM Studioで実際に使用したいモデルのID"
-                    "(上記のLM Studio欄を参照)に設定する",
-                    "recheck_status",
-                ),
+                Suggestion("利用可能なモデルを使用する(Kairoの設定をAutoに切り替える)", "use_available_model"),
+                Suggestion("設定を変更する(AI設定でModelを選び直す)", "open_ai_settings"),
                 Suggestion("状態を再確認", "recheck_status"),
             ],
         )

@@ -3,7 +3,7 @@ import { api } from "../api/client";
 import type { Diagnosis, LLMStatus, ProductionData, Scene, VisualType } from "../types";
 import { VISUAL_TYPE_LABELS } from "../types";
 import { useJobPolling } from "../hooks/useJobPolling";
-import { formatTime } from "../utils/format";
+import { formatTime, MODEL_SOURCE_LABELS } from "../utils/format";
 import AIErrorPanel from "./AIErrorPanel";
 import LlmModelCheckPanel from "./LlmModelCheckPanel";
 import LlmStatusBadge from "./LlmStatusBadge";
@@ -180,8 +180,8 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
               <div className="llm-status-row">
                 <span className="llm-status-key">Requested</span>
                 <span className="llm-status-value">
-                  {llmStatus.model}
-                  {llmStatus.is_placeholder_model ? "(未設定・アプリの既定値)" : ""}
+                  {llmStatus.model ?? "(未解決)"}
+                  {llmStatus.model_source ? ` (${MODEL_SOURCE_LABELS[llmStatus.model_source] ?? llmStatus.model_source})` : ""}
                 </span>
               </div>
             )}

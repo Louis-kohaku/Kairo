@@ -12,17 +12,18 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from pydantic import ValidationError
 
-from app.core.config import LLM_BASE_URL, LLM_MODEL
+from app.core.config import LLM_BASE_URL
 from app.core.db import SessionLocal
 from app.core.paths import project_dir
 from app.models.job import Job
 from app.models.production import Chapter, ProductionSpec, Scene
 from app.models.project import Project
 from app.schemas.production import ChapterScript, PlanOutline
-from app.services import ai_diagnostics, job_log, llm_client, llm_preflight
+from app.services import ai_diagnostics, job_log, llm_client, llm_preflight, time_estimate_service
 from app.services.json_extract import JSONExtractionError, parse_json_object
 
 logger = logging.getLogger(__name__)
@@ -134,10 +135,11 @@ def run_production(
 ) -> None:
     db = SessionLocal()
     current_step = "planning"
+    started_at = time.time()
+    resolved_model_id: str | None = None
     log_lines: list[str] = [
         job_log.timestamp_line("Production started"),
         job_log.timestamp_line("AI Provider: LM Studio"),
-        job_log.timestamp_line(f"Model: {LLM_MODEL}"),
         job_log.timestamp_line(f"Endpoint: {LLM_BASE_URL}/chat/completions"),
         job_log.timestamp_line(f"Task: {STEP_LABELS['planning']}"),
     ]
@@ -148,6 +150,7 @@ def run_production(
         status = llm_preflight.run_check(log_lines)
         if not status.ready:
             raise llm_client.LLMNotReadyError(status)
+        resolved_model_id = status.configured_model
 
         project = db.get(Project, project_id)
         if project is None:
@@ -230,6 +233,15 @@ def run_production(
             message=f"企画完了: {n_chapters}章 / {total_scenes}シーン",
         )
         log_lines.append(job_log.timestamp_line("Production completed"))
+
+        try:
+            time_estimate_service.record_production(
+                target_duration_minutes=target_duration_minutes,
+                elapsed_seconds=time.time() - started_at,
+                model_id=resolved_model_id,
+            )
+        except Exception:
+            logger.exception("Failed to record perf history for production job %s", job_id)
     except Exception as exc:  # noqa: BLE001 - surfaced to the job row for the UI
         logger.exception("Production job %s failed", job_id)
         db.rollback()
@@ -237,15 +249,15 @@ def run_production(
         status = exc.status if isinstance(exc, llm_client.LLMNotReadyError) else llm_client.get_status()
         context = ai_diagnostics.AIContext(
             provider="LM Studio",
-            model=LLM_MODEL,
+            model=status.configured_model or "(未解決)",
             task=STEP_LABELS.get(current_step, current_step),
             operation="Chat Completion",
             endpoint=f"{LLM_BASE_URL}/chat/completions",
             model_status="loaded" if status.can_generate else (
                 "not_loaded" if status.api_ok else "unreachable"
             ),
-            requested_model=LLM_MODEL,
-            is_placeholder_model=status.is_placeholder_model,
+            requested_model=status.configured_model or "",
+            model_source=status.model_source,
             models_loaded=status.models_loaded,
             connection_status="OK" if status.server_reachable else "NG",
             error_code=status.error_code,

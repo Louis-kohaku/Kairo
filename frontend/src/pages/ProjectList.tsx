@@ -4,11 +4,14 @@ import type { Project } from "../types";
 
 export default function ProjectList({
   onOpen,
+  onCreateNew,
+  onOpenSettings,
 }: {
   onOpen: (id: string) => void;
+  onCreateNew: () => void;
+  onOpenSettings: () => void;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
-  const [newName, setNewName] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,39 +25,21 @@ export default function ProjectList({
 
   useEffect(refresh, []);
 
-  const handleCreate = async () => {
-    const name = newName.trim();
-    if (!name) return;
-    try {
-      const project = await api.createProject(name);
-      setNewName("");
-      setProjects((prev) => [project, ...prev]);
-      onOpen(project.id);
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
   return (
     <div style={{ maxWidth: 720, margin: "0 auto", padding: 32 }}>
-      <h1 style={{ fontWeight: 600 }}>Kairo</h1>
-      <p style={{ color: "var(--text-dim)" }}>
-        ローカル完結型 AI 動画制作・編集システム
-      </p>
-
-      <div style={{ display: "flex", gap: 8, margin: "24px 0" }}>
-        <input
-          type="text"
-          placeholder="新しいプロジェクト名"
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-          style={{ flex: 1 }}
-        />
-        <button className="primary" onClick={handleCreate}>
-          作成
-        </button>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div>
+          <h1 style={{ fontWeight: 600, margin: 0 }}>Kairo</h1>
+          <p style={{ color: "var(--text-dim)", margin: "4px 0 0" }}>
+            ローカル完結型 AI 動画制作・編集システム
+          </p>
+        </div>
+        <button onClick={onOpenSettings}>⚙ 設定</button>
       </div>
+
+      <button className="primary" onClick={onCreateNew} style={{ width: "100%", padding: 16, margin: "24px 0", fontSize: 15 }}>
+        + 新しい動画を作成
+      </button>
 
       {error && <div style={{ color: "var(--danger)" }}>{error}</div>}
       {loading && <div style={{ color: "var(--text-dim)" }}>読み込み中...</div>}
@@ -79,7 +64,7 @@ export default function ProjectList({
         ))}
         {!loading && projects.length === 0 && (
           <div style={{ color: "var(--text-dim)" }}>
-            プロジェクトがありません。上のフォームから作成してください。
+            プロジェクトがありません。上のボタンから作成してください。
           </div>
         )}
       </div>

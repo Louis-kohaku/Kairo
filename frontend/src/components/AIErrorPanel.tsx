@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import type { Diagnosis } from "../types";
+import { MODEL_SOURCE_LABELS } from "../utils/format";
 
 interface Props {
   diagnosis: Diagnosis;
@@ -68,7 +69,7 @@ export default function AIErrorPanel({ diagnosis, jobId, onRetry, onRecheck }: P
             <span>Requested Model</span>
             <span>
               {ctx.requested_model || ctx.model}
-              {ctx.is_placeholder_model ? "(未設定・アプリの既定値)" : ""}
+              {ctx.model_source ? ` (${MODEL_SOURCE_LABELS[ctx.model_source] ?? ctx.model_source})` : ""}
             </span>
           </div>
           <div className="ai-error-kv">

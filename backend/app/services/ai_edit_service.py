@@ -12,7 +12,7 @@ import logging
 
 from pydantic import ValidationError
 
-from app.core.config import LLM_BASE_URL, LLM_MAX_OPERATIONS, LLM_MODEL
+from app.core.config import LLM_BASE_URL, LLM_MAX_OPERATIONS
 from app.core.db import SessionLocal
 from app.core.paths import project_dir
 from app.models.job import Job
@@ -134,7 +134,6 @@ def run_ai_edit(project_id: str, job_id: str, instruction: str) -> None:
     log_lines: list[str] = [
         job_log.timestamp_line("AI edit started"),
         job_log.timestamp_line("AI Provider: LM Studio"),
-        job_log.timestamp_line(f"Model: {LLM_MODEL}"),
         job_log.timestamp_line(f"Endpoint: {LLM_BASE_URL}/chat/completions"),
     ]
     try:
@@ -218,15 +217,15 @@ def run_ai_edit(project_id: str, job_id: str, instruction: str) -> None:
             status = exc.status if isinstance(exc, llm_client.LLMNotReadyError) else llm_client.get_status()
             context = ai_diagnostics.AIContext(
                 provider="LM Studio",
-                model=LLM_MODEL,
+                model=status.configured_model or "(未解決)",
                 task="編集指示の解釈",
                 operation="Chat Completion",
                 endpoint=f"{LLM_BASE_URL}/chat/completions",
                 model_status="loaded" if status.can_generate else (
                     "not_loaded" if status.api_ok else "unreachable"
                 ),
-                requested_model=LLM_MODEL,
-                is_placeholder_model=status.is_placeholder_model,
+                requested_model=status.configured_model or "",
+                model_source=status.model_source,
                 models_loaded=status.models_loaded,
                 connection_status="OK" if status.server_reachable else "NG",
                 error_code=status.error_code,

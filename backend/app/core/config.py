@@ -66,7 +66,14 @@ DEFAULT_MIN_KEEP_DURATION = 0.15
 # orchestrator. No cloud fallback is ever used - if this is unreachable,
 # AI-edit requests fail with a clear message instead of degrading silently.
 LLM_BASE_URL = os.environ.get("KAIRO_LLM_BASE_URL", "http://localhost:1234/v1")
-LLM_MODEL = os.environ.get("KAIRO_LLM_MODEL", "local-model")
+# Explicit model override. When unset, Kairo auto-detects whatever LM Studio
+# actually has loaded via /v1/models and picks a model itself (user setting
+# -> PC-based recommendation -> first available) instead of guessing a
+# fixed id - see app/services/llm_client.py's resolve_model(). There is
+# deliberately no "local-model"-style placeholder default here: a fake
+# default that happens to work with LM Studio's lenient dispatch used to
+# mask real misconfiguration instead of surfacing it.
+LLM_MODEL_ENV = os.environ.get("KAIRO_LLM_MODEL", "").strip() or None
 LLM_TIMEOUT = float(os.environ.get("KAIRO_LLM_TIMEOUT", "120"))
 LLM_MAX_OPERATIONS = 10
 
