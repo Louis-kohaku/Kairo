@@ -284,10 +284,33 @@ export interface Job {
 export type AIMode = "auto" | "manual";
 export type QualityPreset = "fast" | "standard" | "high" | "ultra" | "custom";
 export type PerformanceProfile = "auto" | "speed" | "balanced" | "quality" | "custom";
+export type TTSMode = "auto" | "off" | "manual";
+export type SubtitlePosition = "top" | "middle" | "bottom";
+export type SubtitleStyleT = "outline" | "box" | "plain";
 
 export interface AISettingsT {
   mode: AIMode;
   selected_model: string | null;
+}
+
+export interface TTSSettingsT {
+  mode: TTSMode;
+  selected_voice: string | null;
+}
+
+export interface SubtitleSettingsT {
+  enabled: boolean;
+  font: string;
+  size: number;
+  position: SubtitlePosition;
+  color: string;
+  style: SubtitleStyleT;
+}
+
+export interface GenerationSettingsT {
+  parallelism: number; // 0 = auto
+  cache_enabled: boolean;
+  default_engine_id: string | null;
 }
 
 export interface VideoSettingsT {
@@ -315,12 +338,36 @@ export interface AppSettings {
   ai: AISettingsT;
   video: VideoSettingsT;
   performance: PerformanceSettingsT;
+  tts: TTSSettingsT;
+  subtitle: SubtitleSettingsT;
+  generation: GenerationSettingsT;
 }
 
 export interface AppSettingsPatch {
   ai?: Partial<AISettingsT> & { clear_selected_model?: boolean };
   video?: Partial<VideoSettingsT>;
   performance?: Partial<PerformanceSettingsT>;
+  tts?: Partial<TTSSettingsT> & { clear_selected_voice?: boolean };
+  subtitle?: Partial<SubtitleSettingsT>;
+  generation?: Partial<GenerationSettingsT> & { clear_default_engine_id?: boolean };
+}
+
+export interface TTSVoice {
+  id: string;
+  name: string;
+  culture: string;
+  gender: string;
+}
+
+export interface TTSVoicesOut {
+  available: boolean;
+  voices: TTSVoice[];
+  note: string;
+}
+
+export interface ParallelismWarning {
+  level: "recommended" | "caution" | "not_recommended";
+  reason: string;
 }
 
 // ---- AI model management (design doc sections 3-20) ----

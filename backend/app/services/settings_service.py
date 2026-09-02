@@ -77,6 +77,30 @@ def update_settings(patch: AppSettingsPatch) -> AppSettings:
             if patch.performance.custom is not None:
                 current.performance.custom = patch.performance.custom
 
+        if patch.tts is not None:
+            if patch.tts.mode is not None:
+                current.tts.mode = patch.tts.mode
+            if patch.tts.clear_selected_voice:
+                current.tts.selected_voice = None
+            elif patch.tts.selected_voice is not None:
+                current.tts.selected_voice = patch.tts.selected_voice
+
+        if patch.subtitle is not None:
+            for field in ("enabled", "font", "size", "position", "color", "style"):
+                value = getattr(patch.subtitle, field)
+                if value is not None:
+                    setattr(current.subtitle, field, value)
+
+        if patch.generation is not None:
+            if patch.generation.parallelism is not None:
+                current.generation.parallelism = patch.generation.parallelism
+            if patch.generation.cache_enabled is not None:
+                current.generation.cache_enabled = patch.generation.cache_enabled
+            if patch.generation.clear_default_engine_id:
+                current.generation.default_engine_id = None
+            elif patch.generation.default_engine_id is not None:
+                current.generation.default_engine_id = patch.generation.default_engine_id
+
         _write(current)
         return current
 

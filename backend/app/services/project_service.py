@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import shutil
+
 from sqlalchemy.orm import Session
 
-from app.core.paths import create_project_layout
+from app.core.paths import create_project_layout, project_dir
 from app.models.project import Project
 from app.models.timeline import Track
 
@@ -29,3 +31,20 @@ def list_projects(db: Session) -> list[Project]:
 
 def get_project(db: Session, project_id: str) -> Project | None:
     return db.get(Project, project_id)
+
+
+def delete_project(db: Session, project: Project) -> None:
+    """Deletes a project's DB rows (cascades to media assets, tracks/clips,
+    jobs, subtitles, chapters/scenes and generations - see the relationship
+    cascades on Project) and its on-disk directory.
+
+    Everything under `project_dir(project_id)` was created by Kairo itself
+    (imported media is copied in on upload, generated output is written
+    there directly) - nothing there is a user's original file living
+    elsewhere, so removing the whole tree is safe.
+    """
+    project_id = project.id
+    db.delete(project)
+    db.commit()
+
+    shutil.rmtree(project_dir(project_id), ignore_errors=True)

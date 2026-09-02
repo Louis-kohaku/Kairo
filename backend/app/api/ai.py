@@ -4,15 +4,21 @@ generation is expected to take.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+import tempfile
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Response
+from pydantic import BaseModel
 
 from app.core.config import LLM_BASE_URL
 from app.schemas.ai import (
     EstimateOut,
     ModelInfo,
     ModelsListOut,
+    ParallelismWarningOut,
     RecommendationOut,
     SetupCandidate,
+    TTSVoicesOut,
     VideoSettingWarningOut,
 )
 from app.services import (
@@ -21,6 +27,7 @@ from app.services import (
     llm_client,
     model_catalog,
     time_estimate_service,
+    tts_service,
 )
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
@@ -100,3 +107,39 @@ def get_estimate(
     return EstimateOut(
         **time_estimate_service.estimate_total(duration_seconds, quality_preset, engine_id)
     )
+
+
+@router.get("/parallelism-check", response_model=ParallelismWarningOut)
+def check_parallelism(value: int):
+    return ParallelismWarningOut(**ai_recommendation_service.assess_parallelism(value))
+
+
+@router.get("/tts-voices", response_model=TTSVoicesOut)
+def list_tts_voices():
+    if not tts_service.is_supported_platform():
+        return TTSVoicesOut(available=False, voices=[], note="このOSではTTS(音声合成)に対応していません(Windowsのみ対応)。")
+    voices = tts_service.list_voices()
+    if not voices:
+        return TTSVoicesOut(
+            available=False,
+            voices=[],
+            note="現在利用可能なTTSエンジンがありません。Windowsの「設定 > 時刻と言語 > 音声認識」から音声を追加してください。",
+        )
+    return TTSVoicesOut(available=True, voices=[v.__dict__ for v in voices], note=f"{len(voices)}件の音声が利用可能です。")
+
+
+class TTSPreviewRequest(BaseModel):
+    text: str
+    voice_id: str | None = None
+
+
+@router.post("/tts-preview")
+def tts_preview(payload: TTSPreviewRequest):
+    with tempfile.TemporaryDirectory(prefix="kairo_tts_preview_") as tmp:
+        dest = Path(tmp) / "preview.wav"
+        try:
+            tts_service.synthesize_to_wav(payload.text, payload.voice_id, dest)
+        except tts_service.TTSError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        audio_bytes = dest.read_bytes()
+    return Response(content=audio_bytes, media_type="audio/wav")

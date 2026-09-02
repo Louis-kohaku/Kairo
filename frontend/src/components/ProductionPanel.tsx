@@ -61,8 +61,19 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     refreshLlmStatus();
+    // Restore the most recent production job's status/diagnosis on load -
+    // otherwise navigating away from this tab (or reloading) after a
+    // failure loses the "why did it fail" context even though the job row
+    // and its diagnosis are still sitting in the DB.
+    api
+      .listJobs(projectId)
+      .then((jobs) => {
+        const latest = jobs.filter((j) => j.type === "produce")[0];
+        if (latest) track(latest);
+      })
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     if (job?.status === "completed") refresh();
@@ -160,21 +171,33 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
             </div>
             <div className="llm-status-row">
               <span className="llm-status-key">Connection</span>
-              <span className={llmStatus?.server_reachable ? "ok" : "bad"}>
-                {llmStatus?.server_reachable ? "● Connected" : "● Disconnected"}
-              </span>
+              {llmStatus === null ? (
+                <span>… 確認中</span>
+              ) : (
+                <span className={llmStatus.server_reachable ? "ok" : "bad"}>
+                  {llmStatus.server_reachable ? "● Connected" : "● Disconnected"}
+                </span>
+              )}
             </div>
             <div className="llm-status-row">
               <span className="llm-status-key">Server</span>
-              <span className={llmStatus?.api_ok ? "ok" : "bad"}>
-                {llmStatus?.api_ok ? "● Running" : "● 応答なし"}
-              </span>
+              {llmStatus === null ? (
+                <span>… 確認中</span>
+              ) : (
+                <span className={llmStatus.api_ok ? "ok" : "bad"}>
+                  {llmStatus.api_ok ? "● Running" : "● 応答なし"}
+                </span>
+              )}
             </div>
             <div className="llm-status-row">
               <span className="llm-status-key">Model</span>
-              <span className={llmStatus?.ready ? "ok" : "warn"}>
-                {llmStatus?.ready ? `● ${llmStatus.model}` : "⚠ Not Loaded"}
-              </span>
+              {llmStatus === null ? (
+                <span>… 確認中</span>
+              ) : (
+                <span className={llmStatus.ready ? "ok" : "warn"}>
+                  {llmStatus.ready ? `● ${llmStatus.model}` : "⚠ Not Loaded"}
+                </span>
+              )}
             </div>
             {llmStatus && !llmStatus.ready && (
               <div className="llm-status-row">
@@ -187,11 +210,15 @@ export default function ProductionPanel({ projectId }: { projectId: string }) {
             )}
             <div className="llm-status-row">
               <span className="llm-status-key">Model Status</span>
-              <span className={llmStatus?.ready ? "ok" : "bad"}>
-                {llmStatus?.ready
-                  ? "● Loaded"
-                  : `● ${MODEL_STATUS_LABELS[llmStatus?.error_code ?? ""] ?? "未確認"}`}
-              </span>
+              {llmStatus === null ? (
+                <span>… 確認中</span>
+              ) : (
+                <span className={llmStatus.ready ? "ok" : "bad"}>
+                  {llmStatus.ready
+                    ? "● Loaded"
+                    : `● ${MODEL_STATUS_LABELS[llmStatus.error_code ?? ""] ?? "未確認"}`}
+                </span>
+              )}
             </div>
           </div>
           {preflightBlocked && llmStatus?.diagnosis && (

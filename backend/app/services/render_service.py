@@ -19,7 +19,7 @@ from app.models.job import Job
 from app.models.project import Project
 from app.models.subtitle import SubtitleCue
 from app.models.timeline import Clip, Track
-from app.services import ai_diagnostics, job_log
+from app.services import ai_diagnostics, job_log, settings_service, subtitle_style
 from app.services.ffmpeg import engine
 from app.services.srt import build_srt
 
@@ -62,6 +62,12 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> No
     log_lines: list[str] = []
     current_step = "segment_normalization"
     try:
+        app_settings = settings_service.get_settings()
+        # A global "字幕 OFF" in Settings always wins over the per-render
+        # checkbox - it's meant to read as a real on/off switch, not a
+        # suggestion.
+        burn_subtitles = burn_subtitles and app_settings.subtitle.enabled
+
         project = db.get(Project, project_id)
         if project is None:
             raise RenderError(f"Project {project_id} not found")
@@ -85,7 +91,7 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> No
             dest = _segment_cache_path(
                 project_id, clip, project.width, project.height, project.fps
             )
-            if not dest.exists():
+            if not app_settings.generation.cache_enabled or not dest.exists():
                 src_path = project_dir(project_id) / clip.media_asset.stored_path
 
                 def on_progress(frac: float, i=i, n=n) -> None:
@@ -147,7 +153,8 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False) -> No
                 _update_job(job_id, progress=94.0, message="Burning in subtitles", step=current_step)
                 srt_path = work_dir / "burn.srt"
                 srt_path.write_text(build_srt(cues), encoding="utf-8")
-                engine.burn_subtitles(pre_subtitle_path, srt_path, final_path)
+                force_style = subtitle_style.build_force_style(app_settings.subtitle)
+                engine.burn_subtitles(pre_subtitle_path, srt_path, final_path, force_style)
             else:
                 pre_subtitle_path.replace(final_path)
 

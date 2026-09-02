@@ -195,17 +195,25 @@ def loop_or_trim_audio(src: Path, target_duration: float, dest: Path) -> None:
     _run(args, total_duration=target_duration)
 
 
-def burn_subtitles(video_path: Path, srt_path: Path, dest: Path) -> None:
+def burn_subtitles(video_path: Path, srt_path: Path, dest: Path, force_style: str | None = None) -> None:
     """Hardsub an .srt file onto a video via libass. ffmpeg's filtergraph
     mini-language treats ':' as an option separator, so on Windows the
     drive-letter colon in the path must be escaped.
+
+    `force_style` is a libass style override string (e.g.
+    "FontName=Arial,FontSize=48,PrimaryColour=&H00FFFFFF&,Alignment=2"),
+    built from the user's subtitle settings by the caller - see
+    `subtitle_style.build_force_style`.
     """
     escaped_path = str(srt_path.resolve()).replace("\\", "/").replace(":", "\\:")
+    filter_value = f"subtitles='{escaped_path}'"
+    if force_style:
+        filter_value += f":force_style='{force_style}'"
     args = [
         "-i",
         str(video_path),
         "-vf",
-        f"subtitles='{escaped_path}'",
+        filter_value,
         "-c:v",
         "libx264",
         "-preset",

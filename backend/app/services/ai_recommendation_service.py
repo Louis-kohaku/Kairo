@@ -219,3 +219,36 @@ def assess_video_setting(width: int, height: int, fps: float) -> dict:
         return {"level": "caution", "reason": "60fpsは処理時間がやや長くなる場合があります。"}
 
     return {"level": "recommended", "reason": f"{label} / {fps:.0f}fpsはこのPCで問題なく扱える設定です。"}
+
+
+def recommended_parallelism() -> int:
+    """Section 10-style heuristic for a safe default job-concurrency limit:
+    half the logical cores (leaving headroom for FFmpeg/AI workloads that
+    are themselves multi-threaded), floored at 1 and capped at 4."""
+    cpu = system_info_service.get_cpu_info()
+    logical = cpu.get("logical_cores") or 4
+    return max(1, min(logical // 2, 4))
+
+
+def assess_parallelism(value: int) -> dict:
+    """Section 33/34-style warning for the generation-settings "並列数":
+    0 means Auto (always fine, resolved elsewhere), anything else is
+    compared against this PC's logical core count."""
+    if value <= 0:
+        return {"level": "recommended", "reason": "Autoの場合、このPCのCPUコア数から安全な値を自動選択します。"}
+
+    cpu = system_info_service.get_cpu_info()
+    logical = cpu.get("logical_cores") or 4
+    recommended = recommended_parallelism()
+
+    if value > logical:
+        return {
+            "level": "not_recommended",
+            "reason": f"このPCの論理コア数({logical})を超えています。処理が極端に遅くなるか失敗する可能性があります。",
+        }
+    if value > recommended:
+        return {
+            "level": "caution",
+            "reason": f"推奨値は{recommended}です。{value}に設定すると他の処理が重くなる可能性があります。",
+        }
+    return {"level": "recommended", "reason": f"このPC(論理コア数{logical})で問題なく扱える設定です。"}

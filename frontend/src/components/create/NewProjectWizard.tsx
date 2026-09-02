@@ -102,6 +102,10 @@ export default function NewProjectWizard({ onCreated, onCancel, onOpenSettings }
       const updated = await api.updateSettings({ ai: { mode: "manual", selected_model: modelId } });
       setAiSettings(updated.ai);
       api.llmStatus().then(setLlmStatus).catch(() => {});
+      // The model list's `is_current` flags reflect the settings as of the
+      // last fetch, so without this the newly-selected card's checkmark
+      // never moves even though the setting itself saved correctly.
+      api.getAiModels().then((r) => setManualModels(r.models)).catch(() => {});
     } catch (e) {
       setError(String(e));
     }

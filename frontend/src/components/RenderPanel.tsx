@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { Diagnosis } from "../types";
 import { useJobPolling } from "../hooks/useJobPolling";
@@ -22,6 +22,10 @@ function parseDiagnosis(raw: string | null): Diagnosis | null {
 export default function RenderPanel({ projectId, hasVideoClips, hasSubtitles }: Props) {
   const { job, error, setError, track, isBusy } = useJobPolling();
   const [burnSubtitles, setBurnSubtitles] = useState(false);
+
+  useEffect(() => {
+    api.getSettings().then((s) => setBurnSubtitles(s.subtitle.enabled)).catch(() => {});
+  }, []);
 
   const handleRender = async () => {
     setError(null);

@@ -25,3 +25,21 @@ export function formatMinuteRange(low: number, high: number): string {
 export function formatSecondsRangeAsMinutes(lowSeconds: number, highSeconds: number): string {
   return formatMinuteRange(lowSeconds / 60, highSeconds / 60);
 }
+
+export function formatRelativeDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "-";
+  const now = new Date();
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000);
+  if (dayDiff === 0) return "今日";
+  if (dayDiff === 1) return "昨日";
+  if (dayDiff > 1 && dayDiff < 7) return `${dayDiff}日前`;
+  return date.toLocaleDateString("ja-JP", { year: "numeric", month: "numeric", day: "numeric" });
+}
+
+export function aspectRatioLabel(width: number, height: number): string {
+  if (width === height) return "1:1";
+  if (width > height) return "16:9";
+  return "9:16";
+}

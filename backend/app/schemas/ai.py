@@ -69,3 +69,21 @@ class EstimateOut(BaseModel):
 class VideoSettingWarningOut(BaseModel):
     level: str  # "recommended" | "caution" | "not_recommended"
     reason: str
+
+
+class ParallelismWarningOut(BaseModel):
+    level: str  # "recommended" | "caution" | "not_recommended"
+    reason: str
+
+
+class TTSVoiceOut(BaseModel):
+    id: str
+    name: str
+    culture: str
+    gender: str
+
+
+class TTSVoicesOut(BaseModel):
+    available: bool
+    voices: list[TTSVoiceOut] = []
+    note: str

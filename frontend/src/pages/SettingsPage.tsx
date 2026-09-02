@@ -1,26 +1,53 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import SelectCard from "../components/create/SelectCard";
 import AIErrorPanel from "../components/AIErrorPanel";
 import SystemInfoPanel from "../components/SystemInfoPanel";
 import type {
   AppSettings,
+  EngineCapabilities,
   LLMStatus,
   ModelInfo,
+  ParallelismWarning,
   PerformanceProfile,
   QualityPreset,
   RecommendationOut,
+  SubtitlePosition,
+  SubtitleStyleT,
+  TTSVoicesOut,
   VideoSettingWarning,
 } from "../types";
 import { MODEL_SOURCE_LABELS } from "../utils/format";
 
-type Tab = "ai" | "video" | "performance" | "general";
+type Tab = "ai" | "video" | "performance" | "tts" | "subtitle" | "generation" | "general";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "ai", label: "AI" },
   { id: "video", label: "動画" },
   { id: "performance", label: "パフォーマンス" },
+  { id: "tts", label: "音声(TTS)" },
+  { id: "subtitle", label: "字幕" },
+  { id: "generation", label: "生成" },
   { id: "general", label: "一般 / ストレージ" },
+];
+
+const SUBTITLE_POSITIONS: { id: SubtitlePosition; label: string }[] = [
+  { id: "top", label: "上" },
+  { id: "middle", label: "中央" },
+  { id: "bottom", label: "下" },
+];
+
+const SUBTITLE_STYLES: { id: SubtitleStyleT; label: string; description: string }[] = [
+  { id: "outline", label: "縁取り", description: "文字に輪郭線を付けて読みやすくします" },
+  { id: "box", label: "背景ボックス", description: "文字の背景に半透明の帯を敷きます" },
+  { id: "plain", label: "プレーン", description: "装飾なしの文字のみ" },
+];
+
+const PARALLELISM_OPTIONS: { id: number; label: string; description: string }[] = [
+  { id: 0, label: "Auto", description: "PCのCPUコア数から自動選択" },
+  { id: 1, label: "1", description: "同時に1件ずつ処理" },
+  { id: 2, label: "2", description: "同時に2件まで処理" },
+  { id: 3, label: "3", description: "同時に3件まで処理" },
 ];
 
 const QUALITY_PRESETS: { id: QualityPreset; label: string; description: string }[] = [
@@ -51,14 +78,30 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const [videoWarning, setVideoWarning] = useState<VideoSettingWarning | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [ttsVoices, setTtsVoices] = useState<TTSVoicesOut | null>(null);
+  const [ttsPreviewText, setTtsPreviewText] = useState("こんにちは、Kairoの読み上げテストです。");
+  const [ttsPreviewBusy, setTtsPreviewBusy] = useState(false);
+  const [ttsPreviewError, setTtsPreviewError] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const [engines, setEngines] = useState<EngineCapabilities[]>([]);
+  const [parallelismWarning, setParallelismWarning] = useState<ParallelismWarning | null>(null);
+
   const refreshAll = () => {
     api.getSettings().then(setSettings).catch((e) => setError(String(e)));
     api.llmStatus().then(setLlmStatus).catch(() => {});
     api.getAiModels().then((r) => setModels(r.models)).catch(() => {});
     api.getAiRecommendation().then(setRecommendation).catch(() => {});
+    api.getTtsVoices().then(setTtsVoices).catch(() => {});
+    api.listGenerationEngines().then(setEngines).catch(() => {});
   };
 
   useEffect(refreshAll, []);
+
+  useEffect(() => {
+    if (!settings) return;
+    api.checkParallelism(settings.generation.parallelism).then(setParallelismWarning).catch(() => {});
+  }, [settings?.generation.parallelism]);
 
   useEffect(() => {
     if (!settings) return;
@@ -74,9 +117,30 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
       setSettings(updated);
       if (patch.ai) {
         api.llmStatus().then(setLlmStatus).catch(() => {});
+        // Refresh the model list too - its `is_current` flags are only as
+        // fresh as the last fetch, so without this the selected card's
+        // checkmark never moves after picking a different Manual model.
+        api.getAiModels().then((r) => setModels(r.models)).catch(() => {});
       }
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const handleTtsPreview = async () => {
+    setTtsPreviewError(null);
+    setTtsPreviewBusy(true);
+    try {
+      const blob = await api.ttsPreview(ttsPreviewText, settings?.tts.selected_voice ?? null);
+      const url = URL.createObjectURL(blob);
+      if (audioRef.current) {
+        audioRef.current.src = url;
+        await audioRef.current.play();
+      }
+    } catch (e) {
+      setTtsPreviewError(String(e));
+    } finally {
+      setTtsPreviewBusy(false);
     }
   };
 
@@ -125,21 +189,29 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
               <div className="llm-status-grid">
                 <div className="llm-status-row">
                   <span className="llm-status-key">接続</span>
-                  <span className={llmStatus?.server_reachable ? "ok" : "bad"}>
-                    {llmStatus?.server_reachable ? "● Connected" : "● Disconnected"}
-                  </span>
+                  {llmStatus === null ? (
+                    <span>… 確認中</span>
+                  ) : (
+                    <span className={llmStatus.server_reachable ? "ok" : "bad"}>
+                      {llmStatus.server_reachable ? "● Connected" : "● Disconnected"}
+                    </span>
+                  )}
                 </div>
                 <div className="llm-status-row">
                   <span className="llm-status-key">Endpoint</span>
-                  <span className="llm-status-value">{llmStatus?.base_url}</span>
+                  <span className="llm-status-value">{llmStatus?.base_url ?? "-"}</span>
                 </div>
                 <div className="llm-status-row">
                   <span className="llm-status-key">Model</span>
-                  <span className={llmStatus?.ready ? "ok" : "warn"}>
-                    {llmStatus?.model
-                      ? `${llmStatus.model} (${MODEL_SOURCE_LABELS[llmStatus.model_source] ?? llmStatus.model_source})`
-                      : "未解決"}
-                  </span>
+                  {llmStatus === null ? (
+                    <span>… 確認中</span>
+                  ) : (
+                    <span className={llmStatus.ready ? "ok" : "warn"}>
+                      {llmStatus.model
+                        ? `${llmStatus.model} (${MODEL_SOURCE_LABELS[llmStatus.model_source] ?? llmStatus.model_source})`
+                        : "未解決"}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -368,6 +440,239 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     </div>
                   );
                 })()}
+            </div>
+          )}
+
+          {tab === "tts" && (
+            <div className="settings-section">
+              <h2>音声(TTS)</h2>
+              <p className="generation-engine-reason">
+                ナレーションなどのテキストを、WindowsにインストールされているTTS(音声合成)エンジンで読み上げます。
+              </p>
+
+              <div className="select-card-grid select-card-grid-3">
+                <SelectCard
+                  title="Auto"
+                  description="利用可能な音声から自動選択"
+                  selected={settings.tts.mode === "auto"}
+                  disabled={!ttsVoices?.available}
+                  onSelect={() => applyPatch({ tts: { mode: "auto" } })}
+                />
+                <SelectCard
+                  title="Off"
+                  description="TTSを使用しない"
+                  selected={settings.tts.mode === "off"}
+                  onSelect={() => applyPatch({ tts: { mode: "off" } })}
+                />
+                <SelectCard
+                  title="Manual"
+                  description="自分で音声を選択"
+                  selected={settings.tts.mode === "manual"}
+                  disabled={!ttsVoices?.available}
+                  onSelect={() => applyPatch({ tts: { mode: "manual" } })}
+                />
+              </div>
+
+              <h3>利用可能な音声エンジン</h3>
+              {ttsVoices === null && <div className="generation-engine-reason">確認中...</div>}
+              {ttsVoices && !ttsVoices.available && (
+                <div className="settings-diagnosis-box">
+                  <div className="warn">現在利用可能なTTSエンジンがありません。</div>
+                  <div className="generation-engine-reason">{ttsVoices.note}</div>
+                </div>
+              )}
+              {ttsVoices?.available && settings.tts.mode === "manual" && (
+                <div className="select-card-grid select-card-grid-3">
+                  {ttsVoices.voices.map((v) => (
+                    <SelectCard
+                      key={v.id}
+                      title={v.name}
+                      description={`${v.culture} / ${v.gender === "Female" ? "女性" : v.gender === "Male" ? "男性" : v.gender}`}
+                      selected={settings.tts.selected_voice === v.id}
+                      onSelect={() => applyPatch({ tts: { mode: "manual", selected_voice: v.id } })}
+                    />
+                  ))}
+                </div>
+              )}
+              {ttsVoices?.available && settings.tts.mode !== "manual" && (
+                <div className="generation-engine-reason">{ttsVoices.note}</div>
+              )}
+
+              <h3>現在の音声</h3>
+              <div className="settings-ai-auto-box">
+                <div>
+                  {settings.tts.mode === "off"
+                    ? "TTSは無効です。"
+                    : settings.tts.mode === "manual"
+                      ? `選択中: ${ttsVoices?.voices.find((v) => v.id === settings.tts.selected_voice)?.name ?? "未選択"}`
+                      : `Auto: ${ttsVoices?.voices[0]?.name ?? "利用可能な音声がありません"}`}
+                </div>
+                {settings.tts.mode !== "off" && ttsVoices?.available && (
+                  <>
+                    <textarea
+                      className="wizard-content-input"
+                      style={{ marginTop: 10 }}
+                      rows={2}
+                      value={ttsPreviewText}
+                      onChange={(e) => setTtsPreviewText(e.target.value)}
+                    />
+                    <button style={{ marginTop: 8 }} onClick={handleTtsPreview} disabled={ttsPreviewBusy}>
+                      {ttsPreviewBusy ? "生成中..." : "▶ 試聴する"}
+                    </button>
+                    {ttsPreviewError && <div className="wizard-error">{ttsPreviewError}</div>}
+                    {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+                    <audio ref={audioRef} style={{ display: "none" }} />
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {tab === "subtitle" && (
+            <div className="settings-section">
+              <h2>字幕</h2>
+              <div className="select-card-grid select-card-grid-2">
+                <SelectCard
+                  title="ON"
+                  description="書き出し時に字幕を焼き込み可能にする"
+                  selected={settings.subtitle.enabled}
+                  onSelect={() => applyPatch({ subtitle: { enabled: true } })}
+                />
+                <SelectCard
+                  title="OFF"
+                  description="字幕を焼き込まない"
+                  selected={!settings.subtitle.enabled}
+                  onSelect={() => applyPatch({ subtitle: { enabled: false } })}
+                />
+              </div>
+
+              <div className="wizard-output-row" style={{ marginTop: 16 }}>
+                <label className="scene-field">
+                  フォント
+                  <input
+                    type="text"
+                    value={settings.subtitle.font}
+                    onChange={(e) => applyPatch({ subtitle: { font: e.target.value } })}
+                  />
+                </label>
+                <label className="scene-field">
+                  サイズ
+                  <input
+                    type="number"
+                    min={12}
+                    max={120}
+                    value={settings.subtitle.size}
+                    onChange={(e) => applyPatch({ subtitle: { size: Number(e.target.value) } })}
+                  />
+                </label>
+                <label className="scene-field">
+                  色
+                  <input
+                    type="color"
+                    value={settings.subtitle.color}
+                    onChange={(e) => applyPatch({ subtitle: { color: e.target.value } })}
+                  />
+                </label>
+              </div>
+
+              <div className="wizard-section-label" style={{ marginTop: 16 }}>
+                位置
+              </div>
+              <div className="select-card-grid select-card-grid-3">
+                {SUBTITLE_POSITIONS.map((p) => (
+                  <SelectCard
+                    key={p.id}
+                    title={p.label}
+                    selected={settings.subtitle.position === p.id}
+                    onSelect={() => applyPatch({ subtitle: { position: p.id } })}
+                  />
+                ))}
+              </div>
+
+              <div className="wizard-section-label" style={{ marginTop: 16 }}>
+                スタイル
+              </div>
+              <div className="select-card-grid select-card-grid-3">
+                {SUBTITLE_STYLES.map((s) => (
+                  <SelectCard
+                    key={s.id}
+                    title={s.label}
+                    description={s.description}
+                    selected={settings.subtitle.style === s.id}
+                    onSelect={() => applyPatch({ subtitle: { style: s.id } })}
+                  />
+                ))}
+              </div>
+
+              <p className="generation-engine-reason" style={{ marginTop: 12 }}>
+                これらの設定は、編集画面の「書き出し」で字幕を焼き込む際に実際に反映されます。
+              </p>
+            </div>
+          )}
+
+          {tab === "generation" && (
+            <div className="settings-section">
+              <h2>生成</h2>
+
+              <div className="wizard-section-label">並列数</div>
+              <div className="select-card-grid select-card-grid-4">
+                {PARALLELISM_OPTIONS.map((p) => (
+                  <SelectCard
+                    key={p.id}
+                    title={p.label}
+                    description={p.description}
+                    selected={settings.generation.parallelism === p.id}
+                    onSelect={() => applyPatch({ generation: { parallelism: p.id } })}
+                  />
+                ))}
+              </div>
+              {parallelismWarning && (
+                <div
+                  className={
+                    parallelismWarning.level === "recommended"
+                      ? "ok"
+                      : parallelismWarning.level === "caution"
+                        ? "warn"
+                        : "bad"
+                  }
+                  style={{ marginTop: 8 }}
+                >
+                  {parallelismWarning.level === "recommended" ? "●" : "⚠"} {parallelismWarning.reason}
+                </div>
+              )}
+
+              <div className="wizard-section-label" style={{ marginTop: 20 }}>
+                キャッシュ
+              </div>
+              <div className="select-card-grid select-card-grid-2">
+                <SelectCard
+                  title="有効"
+                  description="変更していないクリップの書き出しキャッシュを再利用します(高速)"
+                  selected={settings.generation.cache_enabled}
+                  onSelect={() => applyPatch({ generation: { cache_enabled: true } })}
+                />
+                <SelectCard
+                  title="無効"
+                  description="毎回すべて再生成します(低速・トラブル時の切り分け用)"
+                  selected={!settings.generation.cache_enabled}
+                  onSelect={() => applyPatch({ generation: { cache_enabled: false } })}
+                />
+              </div>
+
+              <div className="wizard-section-label" style={{ marginTop: 20 }}>
+                既定の生成エンジン
+              </div>
+              <div className="select-card-grid select-card-grid-3">
+                {engines.map((eng) => (
+                  <SelectCard
+                    key={eng.id}
+                    title={eng.display_name}
+                    description={eng.status === "ready" ? "準備完了" : eng.status_reason}
+                    selected={settings.generation.default_engine_id === eng.id}
+                    onSelect={() => applyPatch({ generation: { default_engine_id: eng.id } })}
+                  />
+                ))}
+              </div>
             </div>
           )}
 

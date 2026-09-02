@@ -15,13 +15,39 @@ from sqlalchemy.orm import Session
 from app.models.job import Job
 from app.services import (
     ai_edit_service,
+    ai_recommendation_service,
     production_service,
     render_service,
+    settings_service,
     subtitle_service,
     video_generation_service,
 )
 
 _background_tasks: set[asyncio.Task] = set()
+
+# Guards how many jobs actually run their (blocking, CPU/GPU-heavy) work at
+# once, sized from settings.generation.parallelism (0 = auto). Recreated
+# whenever the desired size changes rather than resized in place - simple,
+# and fine at this app's scale (a single user, occasional jobs) even though
+# a job already waiting on the old semaphore when it's swapped keeps
+# waiting on that one until it's released.
+_semaphore_size: int | None = None
+_semaphore: asyncio.Semaphore | None = None
+
+
+def _resolve_parallelism(value: int) -> int:
+    if value <= 0:
+        return ai_recommendation_service.recommended_parallelism()
+    return max(1, min(value, 8))
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _semaphore_size, _semaphore
+    size = _resolve_parallelism(settings_service.get_settings().generation.parallelism)
+    if _semaphore is None or _semaphore_size != size:
+        _semaphore_size = size
+        _semaphore = asyncio.Semaphore(size)
+    return _semaphore
 
 
 def _enqueue(db: Session, project_id: str, job_type: str, target) -> Job:
@@ -89,4 +115,5 @@ def enqueue_image_to_video_job(db: Session, project_id: str, generation_id: str)
 
 
 async def _run(target, job_id: str) -> None:
-    await asyncio.to_thread(target, job_id)
+    async with _get_semaphore():
+        await asyncio.to_thread(target, job_id)

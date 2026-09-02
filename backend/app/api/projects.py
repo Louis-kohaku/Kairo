@@ -27,3 +27,10 @@ def list_projects(db: Session = Depends(get_db)):
 @router.get("/{project_id}", response_model=ProjectOut)
 def get_project(project_id: str, db: Session = Depends(get_db)):
     return get_project_or_404(db, project_id)
+
+
+@router.delete("/{project_id}")
+def delete_project(project_id: str, db: Session = Depends(get_db)):
+    project = get_project_or_404(db, project_id)
+    project_service.delete_project(db, project)
+    return {"ok": True}

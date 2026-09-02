@@ -41,6 +41,12 @@ export default function GenerationPanel({ projectId, onCompleted }: Props) {
 
   useEffect(() => {
     api.listGenerationEngines().then(setEngines).catch((e) => setError(String(e)));
+    api
+      .getSettings()
+      .then((s) => {
+        if (s.generation.default_engine_id) setEngineId(s.generation.default_engine_id);
+      })
+      .catch(() => {});
     refreshHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);

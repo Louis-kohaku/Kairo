@@ -40,6 +40,7 @@ button {
   border-radius: 6px;
   padding: 6px 12px;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 button:hover:not(:disabled) {
@@ -60,6 +61,17 @@ button.primary {
 button.danger:hover:not(:disabled) {
   border-color: var(--danger);
   color: var(--danger);
+}
+
+button.danger.primary {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+button.danger.primary:hover:not(:disabled) {
+  background: #c93f43;
+  color: #fff;
 }
 
 input[type="text"],
@@ -89,6 +101,8 @@ input[type="number"]:focus {
 .editor-topbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  row-gap: 8px;
   gap: 16px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
@@ -97,6 +111,10 @@ input[type="number"]:focus {
 
 .editor-title {
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
 }
 
 .mode-switch {
@@ -127,10 +145,15 @@ input[type="number"]:focus {
 
 .production-form {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   align-items: flex-start;
   max-width: 900px;
   margin-bottom: 16px;
+}
+
+.production-preflight {
+  min-width: 220px;
 }
 
 .production-instruction {
@@ -1540,6 +1563,192 @@ input[type="number"]:focus {
   margin-top: 4px;
 }
 
+/* ---------- Project list (sections 13-14) ---------- */
+
+.project-list-page {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 40px 32px 64px;
+}
+
+.project-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.project-list-title {
+  font-weight: 700;
+  font-size: 26px;
+  margin: 0;
+}
+
+.project-list-subtitle {
+  color: var(--text-dim);
+  margin: 6px 0 0;
+  font-size: 13px;
+}
+
+.project-list-create-btn {
+  width: 100%;
+  padding: 16px;
+  margin: 24px 0 28px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.project-list-empty {
+  color: var(--text-dim);
+  padding: 24px 0;
+  text-align: center;
+}
+
+.project-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+.project-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  overflow: visible;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.12s;
+}
+
+.project-card:hover {
+  border-color: var(--accent-dim);
+}
+
+.project-card-open {
+  text-align: left;
+  border: none;
+  background: none;
+  border-radius: 10px 10px 0 0;
+  padding: 16px 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.project-card-name {
+  font-weight: 600;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-card-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.project-card-updated {
+  margin-top: 2px;
+}
+
+.project-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.project-card-actions > button:first-child {
+  flex: 1;
+}
+
+.project-card-menu-wrap {
+  position: relative;
+}
+
+.project-card-menu-btn {
+  padding: 6px 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.project-card-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 120px;
+  z-index: 10;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.project-card-menu button {
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 8px 10px;
+  border-radius: 5px;
+}
+
+.project-card-menu button:hover {
+  background: var(--bg);
+}
+
+/* ---------- Confirmation modal ---------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.modal-panel {
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.modal-title {
+  font-weight: 600;
+  font-size: 15px;
+  margin-bottom: 12px;
+}
+
+.modal-body {
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 18px;
+}
+
+.modal-project-name {
+  margin-bottom: 8px;
+}
+
+.modal-warning {
+  color: var(--warning);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 /* ---------- Responsive (sections 42-44) ---------- */
 
 @media (max-width: 1024px) {
@@ -1557,6 +1766,15 @@ input[type="number"]:focus {
 
   .settings-body {
     grid-template-columns: 140px 1fr;
+  }
+
+  .editor-main {
+    flex-wrap: wrap;
+  }
+
+  .media-bin,
+  .right-sidebar {
+    width: 220px;
   }
 }
 
@@ -1586,5 +1804,41 @@ input[type="number"]:focus {
   .wizard-output-row {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .project-list-page {
+    padding: 24px 16px 48px;
+  }
+
+  .project-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Editor: side panels stack below the preview instead of squeezing into
+     an unusable sliver. */
+  .editor-main {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .editor-center {
+    border-left: none;
+    border-right: none;
+    min-height: 240px;
+  }
+
+  .media-bin,
+  .clip-inspector,
+  .subtitle-panel,
+  .right-sidebar {
+    width: 100%;
+  }
+
+  .right-sidebar .clip-inspector {
+    max-height: none;
+  }
+
+  .timeline {
+    height: 160px;
   }
 }

@@ -14,6 +14,9 @@ from pydantic import BaseModel
 AIMode = Literal["auto", "manual"]
 QualityPreset = Literal["fast", "standard", "high", "ultra", "custom"]
 PerformanceProfile = Literal["auto", "speed", "balanced", "quality", "custom"]
+TTSMode = Literal["auto", "off", "manual"]
+SubtitlePosition = Literal["top", "middle", "bottom"]
+SubtitleStyle = Literal["outline", "box", "plain"]
 
 
 class AISettings(BaseModel):
@@ -21,6 +24,32 @@ class AISettings(BaseModel):
     # Only meaningful when mode == "manual". None means "no explicit choice
     # yet" - resolve_model() then falls through to the auto recommendation.
     selected_model: Optional[str] = None
+
+
+class TTSSettings(BaseModel):
+    mode: TTSMode = "off"
+    # Only meaningful when mode == "manual". None means "no explicit choice
+    # yet" - the auto path picks the first installed voice matching the
+    # project's language when one is needed.
+    selected_voice: Optional[str] = None
+
+
+class SubtitleSettings(BaseModel):
+    enabled: bool = True
+    font: str = "Yu Gothic UI"
+    size: int = 42
+    position: SubtitlePosition = "bottom"
+    color: str = "#FFFFFF"
+    style: SubtitleStyle = "outline"
+
+
+class GenerationSettings(BaseModel):
+    # 0 means "auto" (Kairo picks a limit from detected CPU core count).
+    parallelism: int = 0
+    cache_enabled: bool = True
+    # Only meaningful as a pre-selection hint for the Generate panel - None
+    # falls back to whatever the panel's own default engine is.
+    default_engine_id: Optional[str] = None
 
 
 class VideoSettings(BaseModel):
@@ -48,6 +77,9 @@ class AppSettings(BaseModel):
     ai: AISettings = AISettings()
     video: VideoSettings = VideoSettings()
     performance: PerformanceSettings = PerformanceSettings()
+    tts: TTSSettings = TTSSettings()
+    subtitle: SubtitleSettings = SubtitleSettings()
+    generation: GenerationSettings = GenerationSettings()
 
 
 class AISettingsPatch(BaseModel):
@@ -56,6 +88,28 @@ class AISettingsPatch(BaseModel):
     # Explicit flag (rather than relying on `selected_model is None`) so a
     # client can deliberately clear a manual selection back to "no choice".
     clear_selected_model: bool = False
+
+
+class TTSSettingsPatch(BaseModel):
+    mode: Optional[TTSMode] = None
+    selected_voice: Optional[str] = None
+    clear_selected_voice: bool = False
+
+
+class SubtitleSettingsPatch(BaseModel):
+    enabled: Optional[bool] = None
+    font: Optional[str] = None
+    size: Optional[int] = None
+    position: Optional[SubtitlePosition] = None
+    color: Optional[str] = None
+    style: Optional[SubtitleStyle] = None
+
+
+class GenerationSettingsPatch(BaseModel):
+    parallelism: Optional[int] = None
+    cache_enabled: Optional[bool] = None
+    default_engine_id: Optional[str] = None
+    clear_default_engine_id: bool = False
 
 
 class VideoSettingsPatch(BaseModel):
@@ -76,3 +130,6 @@ class AppSettingsPatch(BaseModel):
     ai: Optional[AISettingsPatch] = None
     video: Optional[VideoSettingsPatch] = None
     performance: Optional[PerformanceSettingsPatch] = None
+    tts: Optional[TTSSettingsPatch] = None
+    subtitle: Optional[SubtitleSettingsPatch] = None
+    generation: Optional[GenerationSettingsPatch] = None

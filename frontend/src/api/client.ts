@@ -15,9 +15,11 @@ import type {
   Scene,
   Segment,
   SilenceCutPlan,
+  ParallelismWarning,
   SubtitleCue,
   SystemInfo,
   Timeline,
+  TTSVoicesOut,
   VideoSettingWarning,
 } from "../types";
 
@@ -48,6 +50,9 @@ export const api = {
     }),
 
   getProject: (id: string) => request<Project>(`/api/projects/${id}`),
+
+  deleteProject: (id: string) =>
+    request<{ ok: boolean }>(`/api/projects/${id}`, { method: "DELETE" }),
 
   listMedia: (projectId: string) =>
     request<MediaAsset[]>(`/api/projects/${projectId}/media`),
@@ -257,4 +262,22 @@ export const api = {
     request<EstimateOut>(
       `/api/ai/estimate?duration_seconds=${durationSeconds}&quality_preset=${qualityPreset}`,
     ),
+
+  checkParallelism: (value: number) =>
+    request<ParallelismWarning>(`/api/ai/parallelism-check?value=${value}`),
+
+  getTtsVoices: () => request<TTSVoicesOut>("/api/ai/tts-voices"),
+
+  ttsPreview: async (text: string, voiceId: string | null) => {
+    const res = await fetch(`${API_BASE}/api/ai/tts-preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice_id: voiceId }),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(detail.detail ?? `Request failed: ${res.status}`);
+    }
+    return res.blob();
+  },
 };
