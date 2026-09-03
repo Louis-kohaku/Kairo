@@ -31,6 +31,13 @@ PROJECTS_ROOT = DATA_ROOT / "projects"
 # management views.
 MODELS_ROOT = DATA_ROOT / "models"
 
+# The Creative Asset Library: fonts, music and SFX Kairo can draw on,
+# together with the licence record for each. Lives under DATA_ROOT (not the
+# repository) because its contents are downloaded or user-supplied files,
+# not source code, and because everything Kairo stores should be in one
+# place the user can back up or delete.
+LIBRARY_ROOT = Path(os.environ.get("KAIRO_LIBRARY_ROOT", DATA_ROOT / "library")).resolve()
+
 DATABASE_PATH = DATA_ROOT / "kairo.db"
 DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
 
@@ -115,7 +122,15 @@ CORS_ORIGINS = [
 ]
 
 
+# Optional external service keys. Read here (never hardcoded, never
+# committed) so one place answers "what is Kairo configured to reach?".
+# Every one of these is optional: an unset key disables exactly one
+# optional source and changes nothing else.
+YOUTUBE_API_KEY = os.environ.get("KAIRO_YOUTUBE_API_KEY", "").strip()
+
+
 def ensure_data_dirs() -> None:
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
     MODELS_ROOT.mkdir(parents=True, exist_ok=True)
+    LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)

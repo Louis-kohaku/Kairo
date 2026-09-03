@@ -1,5 +1,16 @@
 import type {
   ApplyResult,
+  ConnectedServices,
+  FontCatalogEntry,
+  GenreBreakdown,
+  LibraryAsset,
+  LibraryOverview,
+  TrendContext,
+  TrendOverview,
+  TrendSignal,
+  TrendSourceStatus,
+  VariantResult,
+  VariantSpec,
   AppSettings,
   AppSettingsPatch,
   ChangeProposal,
@@ -288,6 +299,134 @@ export const api = {
     request<Generation[]>(`/api/projects/${projectId}/generations`),
 
   getSystemInfo: () => request<SystemInfo>("/api/system/info"),
+
+  // ---- Trend Intelligence -------------------------------------------
+  //
+  // The store is filled by a background worker; these read it. `collectTrends`
+  // forces a pass now for a user who does not want to wait for the schedule.
+
+  getTrendOverview: () => request<TrendOverview>("/api/trends"),
+
+  getTrendSignals: (opts: {
+    category?: string;
+    platform?: string;
+    includeStale?: boolean;
+    limit?: number;
+  } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.category) params.set("category", opts.category);
+    if (opts.platform) params.set("platform", opts.platform);
+    if (opts.includeStale) params.set("include_stale", "true");
+    if (opts.limit) params.set("limit", String(opts.limit));
+    return request<{ signals: TrendSignal[] }>(`/api/trends/signals?${params}`).then(
+      (r) => r.signals,
+    );
+  },
+
+  getTrendGenres: () =>
+    request<{ genres: GenreBreakdown[] }>("/api/trends/genres").then((r) => r.genres),
+
+  getTrendSources: () =>
+    request<{
+      sources: TrendSourceStatus[];
+      unavailable: { id: string; label: string; reason: string; docs: string }[];
+      worker: { running: boolean; started_at: string | null; next_run_at: string | null };
+    }>("/api/trends/sources"),
+
+  collectTrends: () =>
+    request<{
+      status: string;
+      collected: number;
+      inserted: number;
+      updated: number;
+      sources: { id: string; ok: boolean; count: number; error: string }[];
+    }>("/api/trends/collect", { method: "POST", body: JSON.stringify({}) }),
+
+  refreshTrendProfiles: (force = false) =>
+    request<{ refreshed: string[]; labels: string[] }>("/api/trends/profiles/refresh", {
+      method: "POST",
+      body: JSON.stringify({ force }),
+    }),
+
+  previewTrendContext: (instruction: string) =>
+    request<TrendContext>(
+      `/api/trends/context?instruction=${encodeURIComponent(instruction)}`,
+    ),
+
+  // ---- Creative Asset Library ---------------------------------------
+
+  getLibrary: () => request<LibraryOverview>("/api/library"),
+
+  listLibraryAssets: (opts: {
+    kind?: string;
+    status?: string;
+    japaneseOnly?: boolean;
+    query?: string;
+    limit?: number;
+  } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.kind) params.set("kind", opts.kind);
+    if (opts.status) params.set("status", opts.status);
+    if (opts.japaneseOnly) params.set("japanese_only", "true");
+    if (opts.query) params.set("query", opts.query);
+    if (opts.limit) params.set("limit", String(opts.limit));
+    return request<{ assets: LibraryAsset[]; total: number }>(
+      `/api/library/assets?${params}`,
+    );
+  },
+
+  scanLibrary: (includeSystem = true, reanalyze = false) =>
+    request<{ fonts: Record<string, unknown>; audio: Record<string, unknown> }>(
+      "/api/library/scan",
+      {
+        method: "POST",
+        body: JSON.stringify({ include_system: includeSystem, reanalyze }),
+      },
+    ),
+
+  bootstrapLibrary: (force = false) =>
+    request<Record<string, unknown>>(`/api/library/bootstrap?force=${force}`, {
+      method: "POST",
+    }),
+
+  getFontCatalog: () =>
+    request<{ catalog: FontCatalogEntry[]; note: string }>("/api/library/fonts/catalog"),
+
+  downloadFont: (id: string) =>
+    request<{ downloaded: { family: string; files: string[]; license_id: string } }>(
+      "/api/library/fonts/download",
+      { method: "POST", body: JSON.stringify({ id }) },
+    ),
+
+  setAssetLicense: (assetId: string, licenseId: string, attribution = "") =>
+    request<LibraryAsset>(`/api/library/assets/${assetId}/license`, {
+      method: "POST",
+      body: JSON.stringify({ license_id: licenseId, attribution }),
+    }),
+
+  // ---- A/B/C variants -------------------------------------------------
+  //
+  // Opt-in and asynchronous: each variant is a full re-encode plus a full
+  // review, so this returns a job id to poll rather than the result.
+
+  listVariantSpecs: () =>
+    request<{ variants: VariantSpec[] }>("/api/studio/variants").then((r) => r.variants),
+
+  startVariants: (projectId: string, variants = ["A", "B", "C"]) =>
+    request<{ job_id: string; status: string }>(`/api/projects/${projectId}/variants`, {
+      method: "POST",
+      body: JSON.stringify({ variants }),
+    }),
+
+  getVariants: (projectId: string) =>
+    request<{ result: VariantResult | null }>(`/api/projects/${projectId}/variants`).then(
+      (r) => r.result,
+    ),
+
+  // ---- Connected services -------------------------------------------
+
+  getConnectedServices: () => request<ConnectedServices>("/api/system/services"),
+
 
   getSettings: () => request<AppSettings>("/api/settings"),
 

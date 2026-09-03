@@ -85,6 +85,28 @@ class ProductionRun(Base):
     model_plan_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     improvement_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # --- 動画制作エージェント additions ---------------------------------
+    # The trend slice this run planned against (schemas/trend.TrendContext),
+    # frozen at planning time so a report never re-queries and gets a
+    # different answer than the planner saw.
+    trend_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Which font/BGM/SFX were chosen, why, and under what licence
+    # (schemas/production_assets.AssetDecisions).
+    assets_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The AI Video Reviewer's scoring of the rendered file
+    # (schemas/review.VideoReview), latest iteration.
+    review_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The final production report (schemas/review.ProductionReport).
+    report_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # A/B/C variants of this production, if any were produced
+    # (schemas/review.VariantRecord list, plus the winner).
+    variants_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # How many review->improve->re-render passes this run has completed.
+    iteration: Mapped[int] = mapped_column(Integer, default=0)
+    # Best overall review score seen across iterations, so the run can
+    # adopt the best version rather than the last one.
+    best_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     # Phases already finished, comma-separated in execution order. Resume
     # skips everything listed here.
     completed_phases: Mapped[str] = mapped_column(Text, default="")

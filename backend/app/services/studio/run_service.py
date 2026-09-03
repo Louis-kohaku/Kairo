@@ -178,6 +178,16 @@ def to_dict(db, run: ProductionRun | None) -> dict | None:
         "quality": load_json(run.quality_json),
         "improvement": load_json(run.improvement_json),
         "model_plan": load_json(run.model_plan_json),
+        # 動画制作エージェント: what the agent knew, chose, and thought of the
+        # result. Surfaced on the run so every UI panel reads the same
+        # record the production actually used.
+        "trend": load_json(run.trend_json),
+        "assets": load_json(run.assets_json),
+        "review": load_json(run.review_json),
+        "report": load_json(run.report_json),
+        "variants": load_json(run.variants_json),
+        "iteration": run.iteration or 0,
+        "best_score": run.best_score,
         "scene_count": scene_count,
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "updated_at": run.updated_at.isoformat() if run.updated_at else None,

@@ -236,6 +236,51 @@ def run_quality_check(project_id: str, db: Session = Depends(get_db)):
     return {"report": report.model_dump()}
 
 
+# --------------------------------------------------------- variants
+
+
+class VariantRequest(BaseModel):
+    variants: list[str] = Field(default_factory=lambda: ["A", "B", "C"])
+
+
+@router.get("/studio/variants")
+def variant_specs():
+    """The variants Kairo can produce, and what each changes."""
+    from app.services.studio import variants
+
+    return {"variants": variants.spec_list()}
+
+
+@router.post("/projects/{project_id}/variants")
+def start_variants(
+    project_id: str, payload: VariantRequest | None = None, db: Session = Depends(get_db)
+):
+    """Produces A/B/C variants of the finished production and ranks them.
+
+    Deliberately opt-in and not part of Full Auto: each variant is a full
+    re-encode plus a full review.
+    """
+    get_project_or_404(db, project_id)
+    run = run_service.latest_run(db, project_id)
+    if run is None:
+        raise HTTPException(400, "先に制作を実行してください。")
+    if run.status == "running":
+        raise HTTPException(409, "制作の実行中はバリエーションを作成できません。")
+
+    payload = payload or VariantRequest()
+    job = job_manager.enqueue_variant_job(db, project_id, payload.variants)
+    return {"job_id": job.id, "status": job.status}
+
+
+@router.get("/projects/{project_id}/variants")
+def get_variants(project_id: str, db: Session = Depends(get_db)):
+    get_project_or_404(db, project_id)
+    run = run_service.latest_run(db, project_id)
+    if run is None or not run.variants_json:
+        return {"result": None}
+    return {"result": run_service.load_json(run.variants_json)}
+
+
 # -------------------------------------------------------- co-creation
 
 

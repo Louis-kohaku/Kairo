@@ -152,6 +152,23 @@ def enqueue_image_to_video_job(db: Session, project_id: str, generation_id: str)
     )
 
 
+def enqueue_variant_job(db: Session, project_id: str, variant_ids: list[str] | None = None) -> Job:
+    """Renders A/B/C variants of the current production and scores them.
+
+    A job rather than a request-time call because each variant is a full
+    re-encode: three of them is three renders, which no HTTP request should
+    be holding open.
+    """
+    from app.services.studio import variant_runner
+
+    return _enqueue(
+        db,
+        project_id,
+        "variants",
+        lambda job_id: variant_runner.run_variants(project_id, job_id, variant_ids or []),
+    )
+
+
 def enqueue_studio_run(run_id: str) -> None:
     """Schedules a full production run.
 

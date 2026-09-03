@@ -39,8 +39,12 @@ from app.models.media_asset import MediaAsset
 from app.models.production import Chapter
 from app.models.project import Project
 from app.models.studio import ProductionRun
+from app.models.subtitle import SubtitleCue
 from app.schemas.material import ORIGIN_LABELS
+from app.schemas.production_assets import AssetDecisions
+from app.schemas.review import IterationRecord, VideoReview
 from app.schemas.studio import ProductionStrategy, ResearchResult
+from app.schemas.trend import TrendContext
 from app.services import (
     ai_diagnostics,
     llm_client,
@@ -53,6 +57,7 @@ from app.services.ffmpeg.util import require_binary
 from app.services.studio import (
     assembly_service,
     control,
+    creative_director,
     events,
     material_analysis,
     material_plan,
@@ -61,9 +66,13 @@ from app.services.studio import (
     phases,
     planning_service,
     quality_service,
+    refinement,
+    report as report_service,
     research_service,
+    reviewer,
 )
 from app.services.studio.control import RunStopped
+from app.services.trends import service as trend_service
 
 logger = logging.getLogger(__name__)
 
@@ -111,11 +120,46 @@ class Pipeline:
         self._material_hint: str = ""
         self._material_brief: str = ""
         self._material_plan = material_plan.from_json(self.run.material_plan_json)
+        # 動画制作エージェント state. All restored from the run row rather
+        # than recomputed, so a resumed run uses the trend data and the
+        # asset choices the earlier phases actually acted on instead of
+        # quietly re-deciding behind the user's back.
+        self.trend: TrendContext = self._load_model(TrendContext, self.run.trend_json)
+        self.decisions: AssetDecisions | None = (
+            self._load_optional(AssetDecisions, self.run.assets_json)
+        )
+        self.review: VideoReview | None = self._load_optional(VideoReview, self.run.review_json)
+        self.iterations: list[IterationRecord] = []
+        self._subtitle_override = None
         self.completed: set[str] = {
             p for p in (self.run.completed_phases or "").split(",") if p
         }
 
     # ------------------------------------------------------------ helpers
+
+    def _load_model(self, model_cls, raw: str | None):
+        """Restores a stored pydantic payload, or an empty instance.
+
+        Unreadable stored JSON is treated as absent rather than fatal: the
+        phase that produced it can run again, and losing a run to a schema
+        change would be a worse outcome than redoing one stage.
+        """
+        if not raw:
+            return model_cls()
+        try:
+            return model_cls.model_validate(json.loads(raw))
+        except Exception:
+            logger.info("Could not restore %s from run %s", model_cls.__name__, self.run_id)
+            return model_cls()
+
+    def _load_optional(self, model_cls, raw: str | None):
+        if not raw:
+            return None
+        try:
+            return model_cls.model_validate(json.loads(raw))
+        except Exception:
+            logger.info("Could not restore %s from run %s", model_cls.__name__, self.run_id)
+            return None
 
     def _load_research(self) -> ResearchResult:
         if not self.run.research_json:
@@ -313,6 +357,51 @@ class Pipeline:
             level="tech",
             status="info",
             message=f"TTS voices: {len(voices)} / narration={'on' if self.has_narration else 'off'}",
+        )
+
+        # The asset library has to exist before the audio phase asks it for
+        # a BGM bed. Prepared here rather than there so a first run on a
+        # fresh install spends its 30-odd seconds of FFmpeg synthesis in a
+        # phase that says what it is doing, instead of appearing to stall
+        # halfway through "BGMを選んでいます".
+        from app.models.library import LibraryAsset
+
+        needs_library = (
+            self.db.query(LibraryAsset)
+            .filter(LibraryAsset.kind.in_(("font", "music")))
+            .count()
+            == 0
+        )
+        if needs_library:
+            self.event(
+                "environment",
+                task="素材ライブラリを準備しています",
+                message="フォントを走査し、Kairo内蔵のBGM・効果音を生成します",
+                reason="初回のみ実行されます（30秒ほどかかります）",
+                within_phase=0.5,
+            )
+        try:
+            creative_director.ensure_library(self.db)
+        except Exception:
+            # A missing library costs the run its music, not the run itself.
+            logger.exception("Could not prepare the asset library")
+            self.event(
+                "environment",
+                status="info",
+                message="素材ライブラリを準備できませんでした。BGMはその場で合成します。",
+            )
+
+        counts = {
+            kind: self.db.query(LibraryAsset).filter(LibraryAsset.kind == kind).count()
+            for kind in ("font", "music", "sfx")
+        }
+        self.event(
+            "environment",
+            level="tech",
+            status="info",
+            message=(
+                f"library: fonts={counts['font']} music={counts['music']} sfx={counts['sfx']}"
+            ),
         )
         self._finish_phase("environment", "制作環境の確認が完了しました")
 
@@ -524,10 +613,19 @@ class Pipeline:
         )
 
     def phase_trends(self) -> None:
+        """Two inputs, kept distinct.
+
+        The Web research above is about *this subject* - how videos on this
+        topic are usually built. Trend Intelligence is about *right now* -
+        what the accumulated signals say people are watching in this genre,
+        and what the genre's measured format conventions are. They answer
+        different questions, so both are reported and neither is presented
+        as the other.
+        """
         trends = self.research.trends
         self.event(
             "trends",
-            task="調査結果を共通トレンドと差別化点に整理しています",
+            task="調査結果と蓄積トレンドを整理しています",
             message=(
                 f"共通トレンド{len(trends.common_patterns)}件 / "
                 f"差別化の余地{len(trends.differentiation)}件を抽出しました"
@@ -539,7 +637,46 @@ class Pipeline:
             self.event("trends", status="info", message=f"共通: {pattern}")
         for diff in trends.differentiation[:4]:
             self.event("trends", status="info", message=f"差別化: {diff}")
-        self._finish_phase("trends")
+
+        self.trend = trend_service.build_context(self.db, self.run.instruction)
+        self.run.trend_json = json.dumps(self.trend.model_dump(), ensure_ascii=False)
+        self.db.commit()
+
+        self.event(
+            "trends",
+            status="info",
+            message=f"ジャンル判定: {self.trend.genre_label}",
+            reason=self.trend.reason,
+        )
+        if self.trend.used:
+            for signal in self.trend.signals[:5]:
+                self.event(
+                    "trends",
+                    status="info",
+                    message=f"トレンド: {signal.keyword}（{signal.platform} / スコア{signal.effective_score:.0f}）",
+                    reason=signal.source,
+                )
+            profile = self.trend.profile
+            if profile is not None:
+                label = (
+                    "トレンド分析による傾向"
+                    if self.trend.profile_source == "llm"
+                    else "Kairo組み込みの定石（トレンド実測値ではありません）"
+                )
+                self.event(
+                    "trends",
+                    status="info",
+                    message=(
+                        f"{self.trend.genre_label}の傾向: 尺{profile.duration_seconds or '-'}秒 / "
+                        f"1カット{profile.scene_seconds or '-'}秒 / BGM {profile.bgm_mood or '-'}"
+                    ),
+                    reason=label,
+                )
+            self._finish_phase(
+                "trends", f"{self.trend.genre_label}のトレンド{len(self.trend.signals)}件を反映しました"
+            )
+        else:
+            self._finish_phase("trends", f"ジャンル定石で進めます（{self.trend.reason}）")
 
     def phase_strategy(self) -> None:
         self.event(
@@ -555,6 +692,7 @@ class Pipeline:
             self.run.orientation,
             material_hint=self._material_brief,
         )
+        self._apply_genre_profile()
         self.run.strategy_json = json.dumps(self.strategy.model_dump(), ensure_ascii=False)
         self.db.commit()
         self.event(
@@ -564,6 +702,39 @@ class Pipeline:
             reason=f"差別化: {self.strategy.differentiation}",
         )
         self._finish_phase("strategy", f"戦略「{self.strategy.title}」を決定しました")
+
+    def _apply_genre_profile(self) -> None:
+        """Nudges the strategy towards the genre's measured conventions.
+
+        Deliberately a nudge and not an override. The strategy was written
+        for *this* brief; the profile knows what the genre usually does. So
+        the cut length is blended rather than replaced, and the BGM mood is
+        only taken when the strategy did not express one - a trend profile
+        that silently discarded a deliberate creative choice would be worse
+        than no profile.
+        """
+        profile = self.trend.profile if self.trend else None
+        if profile is None or not self.trend.used:
+            return
+
+        changes: list[str] = []
+        if profile.scene_seconds:
+            before = self.strategy.scene_seconds_max
+            blended = round((before + float(profile.scene_seconds) * 1.35) / 2.0, 2)
+            if abs(blended - before) >= 0.2:
+                self.strategy.scene_seconds_max = blended
+                changes.append(f"1カットの上限 {before:.1f}秒 → {blended:.1f}秒")
+        if profile.bgm_mood and not (self.strategy.bgm_mood or "").strip():
+            self.strategy.bgm_mood = profile.bgm_mood
+            changes.append(f"BGMの雰囲気を「{profile.bgm_mood}」に設定")
+
+        for change in changes:
+            self.event(
+                "strategy",
+                status="info",
+                message=change,
+                reason=f"{self.trend.genre_label}ジャンルの傾向に合わせたため",
+            )
 
     def phase_planning(self) -> None:
         self.event(
@@ -857,19 +1028,109 @@ class Pipeline:
         self._finish_phase("narration", f"{spoken}シーン分のナレーションを合成しました")
 
     def phase_audio(self) -> None:
+        """Choose the music and effects, then cut to the music.
+
+        The order matters: the bed is chosen first because its tempo is what
+        the scene lengths get snapped to, and the effects are placed last
+        because their timestamps depend on the (possibly adjusted) scene
+        boundaries.
+        """
         self._ensure_scenes()
         total = sum(s.estimated_duration for s in self.scenes)
         mood = self.strategy.bgm_mood or "gentle"
         self.event(
             "audio",
-            task="BGMを用意しています",
-            message=f"雰囲気「{mood}」のBGMを{total:.0f}秒分生成します",
+            task="BGMと効果音を選んでいます",
+            message=f"雰囲気「{mood}」に合うBGMをライブラリから選びます",
             reason=self.strategy.audio_policy or "ナレーションを邪魔しない音量で敷きます",
             next_task="字幕",
         )
-        self._bgm_asset = assembly_service.build_bgm(self.db, self.project, total, mood)
+
+        profile = self.trend.profile if self.trend and self.trend.used else None
+        tempo = (profile.cut_tempo if profile and profile.cut_tempo else "medium")
+        decisions = creative_director.build(
+            self.db,
+            genre=self.trend.genre if self.trend else "unknown",
+            genre_label=self.trend.genre_label if self.trend else "",
+            profile=profile,
+            scenes=self.scenes,
+            duration=total,
+            mood=mood,
+            tempo=tempo,
+            subtitle_base=self.settings.subtitle,
+            width=self.project.width,
+            height=self.project.height,
+            require_commercial=self.settings.library.prefer_commercial_safe,
+            target_scene_seconds=max(1.2, self.strategy.scene_seconds_max * 0.8),
+        )
+        self.decisions = decisions
+        self._persist_decisions()
+
+        music = decisions.music
+        if music is not None and music.found:
+            self.event(
+                "audio",
+                status="info",
+                message=(
+                    f"BGM: {music.name}"
+                    + (f"（{music.bpm:.0f}BPM）" if music.bpm else "")
+                ),
+                reason=f"{music.reason} / ライセンス: {music.license.status_label}（{music.license.name}）",
+            )
+            self._bgm_asset = creative_director.import_library_audio(
+                self.db, self.project.id, music, origin="kairo_bgm", label="BGM"
+            )
+        else:
+            self.event(
+                "audio",
+                status="info",
+                message="ライブラリから使用できるBGMが選べませんでした。",
+                reason=(music.reason if music else "") or "候補がありません",
+            )
+            self._bgm_asset = None
+
+        # Falling back to synthesis rather than to silence: a generated bed
+        # is licence-clean by construction, so there is never a reason for a
+        # video to end up with no music because the library was empty.
         if self._bgm_asset is None:
-            self._skip_phase("audio", "BGMを生成できませんでした。無音で制作を続けます。")
+            self._bgm_asset = assembly_service.build_bgm(self.db, self.project, total, mood)
+            if self._bgm_asset is not None:
+                self.event(
+                    "audio",
+                    status="info",
+                    message="その場でBGMを合成しました。",
+                    reason="ライブラリに条件に合う曲がなかったため",
+                )
+
+        beat = decisions.beat_sync
+        if beat.applied:
+            # Assembly re-encodes every scene clip after this phase, so
+            # changing the durations here is enough - there is no separate
+            # "re-render the touched scenes" step to schedule.
+            changed = creative_director.apply_beat_sync(self.scenes, beat)
+            if changed:
+                planning_service.recompute_start_times(self.scenes)
+                self.db.commit()
+            self.event(
+                "audio",
+                status="info",
+                message=f"カットを{beat.bpm:.0f}BPMのビートに合わせました",
+                reason=beat.reason,
+            )
+        elif beat.reason:
+            self.event("audio", status="info", message="ビート同期なし", reason=beat.reason)
+
+        if decisions.sfx:
+            kinds = ", ".join(sorted({p.category for p in decisions.sfx}))
+            self.event(
+                "audio",
+                status="info",
+                message=f"効果音{len(decisions.sfx)}箇所を配置しました（{kinds}）",
+                reason="場面転換と冒頭・締めだけに絞り、使いすぎないようにしています",
+            )
+
+        if self._bgm_asset is None and not decisions.sfx:
+            self._skip_phase("audio", "BGM・効果音を用意できませんでした。無音で制作を続けます。")
             return
         self._finish_phase("audio", "BGMと効果音を用意しました")
 
@@ -878,13 +1139,35 @@ class Pipeline:
         self.event(
             "subtitles",
             task="字幕を整えています",
-            message="1行の文字数と表示タイミングを調整します",
+            message="書体・1行の文字数・表示タイミングを調整します",
             reason=self.strategy.subtitle_policy or "スマートフォンで一目で読めるようにするため",
             next_task="編集",
         )
-        cues = assembly_service.compose_cues(
-            self.db, self.project.id, self.scenes, self._caption_budget()
+
+        decision = self.decisions.subtitle if self.decisions else None
+        font = self.decisions.font if self.decisions else None
+        if font is not None and font.found:
+            self.event(
+                "subtitles",
+                status="info",
+                message=f"字幕フォント: {font.family or font.name}",
+                reason=(
+                    f"{font.reason} / ライセンス: {font.license.status_label}"
+                    f"（{font.license.name}）"
+                ),
+            )
+        elif font is not None:
+            self.event(
+                "subtitles",
+                status="info",
+                message="フォントを自動選択できませんでした。設定のフォントを使用します。",
+                reason=font.reason,
+            )
+
+        budget = decision.max_chars_per_line if decision and decision.max_chars_per_line else (
+            self._caption_budget()
         )
+        cues = assembly_service.compose_cues(self.db, self.project.id, self.scenes, budget)
         assembly_service.write_srt(self.project.id, cues)
         self._finish_phase("subtitles", f"{len(cues)}件の字幕を作成しました")
 
@@ -1035,7 +1318,51 @@ class Pipeline:
         )
         self._finish_phase("preview", "プレビューできます")
 
-    def phase_render(self) -> None:
+    def _persist_decisions(self) -> None:
+        if self.decisions is None:
+            return
+        self.run.assets_json = json.dumps(self.decisions.model_dump(), ensure_ascii=False)
+        self.db.commit()
+
+    def _subtitle_settings(self):
+        """The caption style this run renders with.
+
+        Built from the user's settings plus the agent's font choice, and
+        never written back into settings - see render_service.run_render's
+        `subtitle_override`.
+        """
+        if self.decisions is None:
+            return None
+        resolved, _decision = creative_director.subtitle_settings_for(
+            self.settings.subtitle,
+            self.decisions.font,
+            self.trend.profile if self.trend and self.trend.used else None,
+            width=self.project.width,
+            height=self.project.height,
+        )
+        return resolved
+
+    def _sfx_render_list(self):
+        if self.decisions is None or not self.decisions.sfx:
+            return None
+        return creative_director.sfx_render_list(self.db, self.decisions.sfx) or None
+
+    def _cues(self) -> list:
+        return (
+            self.db.query(SubtitleCue)
+            .filter(SubtitleCue.project_id == self.project.id)
+            .order_by(SubtitleCue.order_index)
+            .all()
+        )
+
+    def _render_once(self, *, phase_id: str, message: str) -> str:
+        """One full render pass. Returns the job's output path.
+
+        Shared by the first render and every refinement re-render, so a
+        re-rendered video goes through exactly the same encode, subtitle
+        burn and SFX overlay as the original - a refinement that rendered
+        differently would make its own score incomparable.
+        """
         burn = self.settings.subtitle.enabled
         job = Job(project_id=self.project.id, type="render", status="pending")
         self.db.add(job)
@@ -1045,38 +1372,281 @@ class Pipeline:
         self.db.commit()
 
         self.event(
-            "render",
-            task="FFmpegでMP4を書き出しています",
-            message="シーンを連結し、BGMと字幕を合成します",
-            reason="最終的なMP4ファイルを作成するため",
-            next_task="完成",
-        )
-        self.event(
-            "render",
+            phase_id,
             level="tech",
             status="info",
-            message=f"render job {job.id} / burn_subtitles={burn} / crf={self._crf()}",
+            message=(
+                f"render job {job.id} / burn_subtitles={burn} / crf={self._crf()} / {message}"
+            ),
         )
-
-        render_service.run_render(self.project.id, job.id, burn, self._crf())
-
+        render_service.run_render(
+            self.project.id,
+            job.id,
+            burn,
+            self._crf(),
+            subtitle_override=self._subtitle_settings(),
+            sfx=self._sfx_render_list(),
+        )
         self.db.expire_all()
         finished = self.db.get(Job, job.id)
         if finished is None or finished.status != "completed":
             detail = (finished.error if finished else None) or "書き出しに失敗しました"
             raise PipelineError(detail)
-
         self.run.output_path = finished.output_path
         self.db.commit()
+        return finished.output_path or ""
+
+    def _output_file(self):
+        from app.core.paths import project_dir
+
+        if not self.run.output_path:
+            return None
+        return project_dir(self.project.id) / self.run.output_path
+
+    def _run_review(self, iteration: int) -> VideoReview:
+        path = self._output_file()
+        if path is None:
+            return VideoReview(
+                performed=False,
+                iteration=iteration,
+                error="書き出し結果のパスが記録されていません",
+                summary="完成動画を解析できませんでした。",
+            )
+        decision = self.decisions.subtitle if self.decisions else None
+        return reviewer.review(
+            path,
+            self.scenes,
+            self._cues(),
+            strategy=self.strategy,
+            trend=self.trend,
+            max_chars_per_line=(
+                decision.max_chars_per_line
+                if decision and decision.max_chars_per_line
+                else self._caption_budget()
+            ),
+            has_bgm=self.bgm_asset is not None,
+            has_narration=any(s.narration_duration for s in self.scenes),
+            iteration=iteration,
+        )
+
+    def phase_review(self) -> None:
+        """Score the file that actually came out of FFmpeg."""
+        self._ensure_scenes()
+        self.event(
+            "review",
+            task="完成した動画を解析しています",
+            message="尺・輝度・音量・字幕・構成を実測して採点します",
+            reason="計画ではなく、実際に書き出されたMP4を評価するため",
+            next_task="自動改善ループ",
+        )
+        review = self._run_review(iteration=0)
+        self.review = review
+        self.run.review_json = reviewer.to_json(review)
+        self.run.best_score = review.overall_score
+        self.db.commit()
+
+        if not review.performed:
+            self.event(
+                "review",
+                status="info",
+                message="完成動画を解析できませんでした。",
+                reason=review.error,
+            )
+            self._finish_phase("review", "レビューを実行できませんでした")
+            return
+
+        for axis in review.axes:
+            basis = {"measured": "実測", "planned": "構成から", "ai": "AI判断"}.get(
+                axis.basis, axis.basis
+            )
+            self.event(
+                "review",
+                status="info",
+                message=f"{axis.label}: {axis.score:.0f}点",
+                reason=f"{basis} / {axis.detail}",
+            )
+        for finding in review.findings[:6]:
+            self.event(
+                "review",
+                status="info",
+                scene_id=(
+                    self.scenes[finding.scene_index].id
+                    if finding.scene_index is not None
+                    and 0 <= finding.scene_index < len(self.scenes)
+                    else None
+                ),
+                message=finding.problem,
+                reason=f"原因: {finding.cause} / 改善案: {finding.suggestion}",
+            )
+        self.iterations = [
+            IterationRecord(
+                iteration=0,
+                score=review.overall_score,
+                output_path=self.run.output_path or "",
+                adopted=True,
+                note="初回書き出し",
+            )
+        ]
+        self._finish_phase(
+            "review",
+            f"総合{review.overall_score:.0f}点 / 指摘{len(review.findings)}件（{review.reviewed_by}）",
+        )
+
+    def phase_refine(self) -> None:
+        """Review -> improve -> re-render, bounded, adopting the best version."""
+        self._ensure_scenes()
+        settings = self.settings.refinement
+        review = self.review
+        if review is None or not review.performed:
+            self._skip_phase("refine", "レビュー結果がないため自動改善をスキップしました")
+            return
+        if not self.iterations:
+            self.iterations = [
+                IterationRecord(
+                    iteration=0,
+                    score=review.overall_score,
+                    output_path=self.run.output_path or "",
+                    adopted=True,
+                )
+            ]
+
+        outputs: dict[int, str] = {0: self.run.output_path or ""}
+        while True:
+            control.checkpoint(self.run_id)
+            proceed, reason = refinement.should_continue(settings, self.iterations, review)
+            if not proceed:
+                self.event("refine", status="info", message="自動改善を終了します", reason=reason)
+                break
+
+            iteration = len(self.iterations)
+            self.event(
+                "refine",
+                task=f"{iteration}回目の自動改善を行っています",
+                message=reason,
+                within_phase=min(0.9, iteration / max(1, settings.max_iterations)),
+                next_task="完成",
+            )
+            changes, dirty = refinement.apply_findings(
+                self.db,
+                self.scenes,
+                review.findings,
+                project_id=self.project.id,
+                max_chars_per_line=self._caption_budget(),
+                target_seconds=self._target_seconds(),
+                scene_seconds_max=self.strategy.scene_seconds_max,
+            )
+            if not changes:
+                self.event(
+                    "refine",
+                    status="info",
+                    message="適用できる修正がありませんでした",
+                    reason="指摘は残っていますが、自動で直せるものはありません。",
+                )
+                break
+
+            for change in changes:
+                self.event("refine", status="info", message=change)
+
+            if dirty:
+                planning_service.recompute_start_times(self.scenes)
+                self.db.commit()
+                for i in sorted(dirty):
+                    control.checkpoint(self.run_id)
+                    self.event(
+                        "refine",
+                        task=f"Scene {i + 1}を作り直しています",
+                        scene_id=self.scenes[i].id,
+                        message=f"変更後の{self.scenes[i].estimated_duration:.1f}秒で再生成します",
+                    )
+                    self._build_clip(self.scenes[i], i)
+
+            cues = assembly_service.compose_cues(
+                self.db, self.project.id, self.scenes, self._caption_budget()
+            )
+            assembly_service.write_srt(self.project.id, cues)
+            if dirty:
+                assembly_service.assemble(self.db, self.project, self.scenes, self.bgm_asset)
+                self._sync_plan_times()
+
+            self._render_once(phase_id="refine", message=f"refine iteration {iteration}")
+            review = self._run_review(iteration=iteration)
+            self.review = review
+            self.run.review_json = reviewer.to_json(review)
+            self.run.iteration = iteration
+            self.db.commit()
+
+            outputs[iteration] = self.run.output_path or ""
+            previous = self.iterations[-1].score
+            self.iterations.append(
+                IterationRecord(
+                    iteration=iteration,
+                    score=review.overall_score,
+                    changes=changes,
+                    output_path=self.run.output_path or "",
+                )
+            )
+            self.event(
+                "refine",
+                status="info",
+                message=f"{iteration}回目のスコア: {review.overall_score:.0f}点",
+                reason=f"前回比 {review.overall_score - previous:+.1f}点",
+            )
+
+        best = refinement.best_iteration(self.iterations)
+        if best is not None:
+            for record in self.iterations:
+                record.adopted = record.iteration == best.iteration
+            self.run.best_score = best.score
+            # The best render is adopted by pointing the run at its file.
+            # Every iteration's MP4 stays on disk under its own job id, so a
+            # version that was not adopted is still there if the user wants
+            # it.
+            if outputs.get(best.iteration):
+                self.run.output_path = outputs[best.iteration]
+            self.db.commit()
+            if best.iteration != self.iterations[-1].iteration:
+                self.event(
+                    "refine",
+                    status="info",
+                    message=f"{best.iteration}回目({best.score:.0f}点)を最終版として採用しました",
+                    reason="最後の版より高いスコアだったため",
+                )
+
+        self._finish_phase(
+            "refine",
+            f"{len(self.iterations) - 1}回改善 / 最終{(best.score if best else 0):.0f}点",
+        )
+
+    def phase_render(self) -> None:
+        burn = self.settings.subtitle.enabled
+        sfx = self._sfx_render_list()
+        self.event(
+            "render",
+            task="FFmpegでMP4を書き出しています",
+            message=(
+                "シーンを連結し、BGM・字幕"
+                + (f"・効果音{len(sfx)}箇所" if sfx else "")
+                + "を合成します"
+            ),
+            reason="最終的なMP4ファイルを作成するため",
+            next_task="完成動画レビュー",
+        )
+        self._render_once(phase_id="render", message="initial render")
         self._finish_phase("render", "MP4の書き出しが完了しました")
 
     def phase_done(self) -> None:
         duration = sum(s.estimated_duration for s in self.scenes) if self.scenes else 0.0
+        self._write_production_record(duration)
+        score = self.review.overall_score if self.review and self.review.performed else None
         self.event(
             "done",
             status="done",
             task="完成",
-            message=f"動画が完成しました（約{duration:.0f}秒）",
+            message=(
+                f"動画が完成しました（約{duration:.0f}秒"
+                + (f" / 総合{score:.0f}点" if score is not None else "")
+                + "）"
+            ),
             within_phase=1.0,
         )
         self.completed.add("done")
@@ -1084,6 +1654,69 @@ class Pipeline:
         self.run.status = "completed"
         self.run.progress = 100.0
         self.db.commit()
+
+    def _write_production_record(self, duration: float) -> None:
+        """The licence audit trail and the production report.
+
+        Written at the end of the run from the decisions the pipeline
+        actually acted on, never re-derived: a report that re-queried the
+        library or the trend store could describe a different video than
+        the one that was made.
+        """
+        from app.services.studio import material_usage
+
+        try:
+            usage = material_usage.build_report(self.db, self.project.id)
+            payload = report_service.build_assets_used(
+                self.project.id, self.decisions, material_origins=usage.counts
+            )
+            assets_path = report_service.write_assets_used(self.project.id, payload)
+
+            transcription = "faster-whisper (ローカル)"
+            tts_engine = (
+                "Windows SAPI5 (ローカル)"
+                if self.has_narration
+                else "未使用（この環境では音声合成が使えないか、設定でOFFです）"
+            )
+            report = report_service.build_report(
+                project=self.project,
+                run=self.run,
+                decisions=self.decisions,
+                trend=self.trend,
+                review=self.review,
+                iterations=self.iterations,
+                strategy=self.strategy,
+                model_id=self.model_id,
+                duration=duration,
+                transcription_engine=transcription,
+                tts_engine=tts_engine,
+                assets_used_path=str(assets_path),
+            )
+            self.run.report_json = report_service.to_json(report)
+            self.db.commit()
+            report_service.write_report(self.project.id, report)
+
+            attribution = self.decisions.attribution_lines() if self.decisions else []
+            if attribution:
+                self.event(
+                    "done",
+                    status="info",
+                    message="クレジット表記が必要な素材があります",
+                    reason=" / ".join(attribution[:3]),
+                )
+            self.event(
+                "done",
+                level="tech",
+                status="info",
+                message=f"assets-used.json written to {assets_path}",
+            )
+        except Exception:  # noqa: BLE001 - the video exists; the record is secondary
+            logger.exception("Could not write the production record for run %s", self.run_id)
+            self.event(
+                "done",
+                status="info",
+                message="制作レポートの書き出しに失敗しました（動画自体は完成しています）。",
+            )
 
     # ------------------------------------------------------------ support
 
@@ -1166,6 +1799,8 @@ class Pipeline:
         ("recheck", "phase_recheck"),
         ("preview", "phase_preview"),
         ("render", "phase_render"),
+        ("review", "phase_review"),
+        ("refine", "phase_refine"),
         ("done", "phase_done"),
     )
 

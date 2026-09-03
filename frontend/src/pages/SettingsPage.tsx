@@ -3,6 +3,9 @@ import { api } from "../api/client";
 import SelectCard from "../components/create/SelectCard";
 import AIErrorPanel from "../components/AIErrorPanel";
 import SystemInfoPanel from "../components/SystemInfoPanel";
+import TrendSettingsTab from "../components/settings/TrendSettingsTab";
+import LibraryTab from "../components/settings/LibraryTab";
+import ConnectedServicesTab from "../components/settings/ConnectedServicesTab";
 import type {
   AppSettings,
   EngineCapabilities,
@@ -19,7 +22,17 @@ import type {
 } from "../types";
 import { MODEL_SOURCE_LABELS } from "../utils/format";
 
-type Tab = "ai" | "video" | "performance" | "tts" | "subtitle" | "generation" | "general";
+type Tab =
+  | "ai"
+  | "video"
+  | "performance"
+  | "tts"
+  | "subtitle"
+  | "generation"
+  | "trends"
+  | "library"
+  | "services"
+  | "general";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "ai", label: "AI" },
@@ -28,6 +41,9 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "tts", label: "音声(TTS)" },
   { id: "subtitle", label: "字幕" },
   { id: "generation", label: "生成" },
+  { id: "trends", label: "トレンド" },
+  { id: "library", label: "素材ライブラリ" },
+  { id: "services", label: "接続サービス" },
   { id: "general", label: "一般 / ストレージ" },
 ];
 
@@ -679,6 +695,21 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                 ))}
               </div>
             </div>
+          )}
+
+          {tab === "trends" && settings && (
+            <TrendSettingsTab settings={settings.trends} applyPatch={applyPatch} />
+          )}
+
+          {tab === "library" && settings && (
+            <LibraryTab settings={settings.library} applyPatch={applyPatch} />
+          )}
+
+          {tab === "services" && settings && (
+            <ConnectedServicesTab
+              refinement={settings.refinement}
+              applyPatch={applyPatch}
+            />
           )}
 
           {tab === "general" && (

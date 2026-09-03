@@ -7,12 +7,16 @@ keeping the "LLM backend is swappable" requirement intact.
 """
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
 import requests
 
 from app.core.config import LLM_BASE_URL, LLM_MODEL_ENV, LLM_TIMEOUT
+
+logger = logging.getLogger(__name__)
 
 
 class LLMUnavailableError(RuntimeError):
@@ -32,6 +36,16 @@ class LLMTimeoutError(RuntimeError):
 
 class LLMResponseError(RuntimeError):
     pass
+
+
+class LLMModelCrashedError(LLMResponseError):
+    """LM Studio reported that the model itself died.
+
+    A subclass of LLMResponseError so every existing `except
+    LLMResponseError` keeps catching it - the pipeline's optional stages
+    must go on treating it as "this stage could not run", not as something
+    new they fail on.
+    """
 
 
 # Error codes a preflight check classifies LM Studio's state into. "OK"
@@ -101,17 +115,34 @@ def resolve_model(available_models: list[str]) -> ResolvedModel:
 
     chat_models = [m for m in available_models if _is_chat_capable(m)]
 
-    if chat_models:
+    # Text generation is what this model is being resolved *for* - scripts,
+    # scene design, reviews. A vision model does that job more slowly than a
+    # text-only model of the same size because it carries an image encoder,
+    # and `vision_model()` resolves the image-analysis model independently,
+    # so nothing is lost by setting VLMs aside when a text-only model is
+    # also loaded.
+    text_only = [m for m in chat_models if not is_vision_model(m)]
+    preferred = text_only or chat_models
+    vision_deferred = bool(text_only) and len(text_only) < len(chat_models)
+
+    if preferred:
         from app.services import ai_recommendation_service
 
-        rec = ai_recommendation_service.recommend_model(chat_models)
+        rec = ai_recommendation_service.recommend_model(preferred)
+        note = (
+            "（画像対応モデルは素材解析用に温存し、文章生成にはテキスト専用モデルを使います）"
+            if vision_deferred
+            else ""
+        )
         if rec.get("recommended_model_id"):
-            return ResolvedModel(rec["recommended_model_id"], "auto", "; ".join(rec["reasons"]))
+            return ResolvedModel(
+                rec["recommended_model_id"], "auto", "; ".join(rec["reasons"]) + note
+            )
         return ResolvedModel(
-            chat_models[0],
+            preferred[0],
             "fallback",
             "PC性能に適した既知のモデルとは一致しませんでしたが、"
-            "LM Studioにロードされているモデルを使用します。",
+            "LM Studioにロードされているモデルを使用します。" + note,
         )
 
     if available_models:
@@ -320,29 +351,112 @@ def vision_completion(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": content})
 
-    url = f"{LLM_BASE_URL.rstrip('/')}/chat/completions"
     payload = {"model": resolved, "messages": messages, "temperature": temperature}
-    try:
-        resp = requests.post(url, json=payload, timeout=LLM_TIMEOUT)
-    except requests.Timeout as exc:
-        raise LLMTimeoutError(
-            f"画像解析モデル「{resolved}」からの応答が{LLM_TIMEOUT:.0f}秒以内に返りませんでした。"
-        ) from exc
-    except requests.RequestException as exc:
-        raise LLMUnavailableError(
-            f"LM Studioに接続できません ({LLM_BASE_URL})。"
-        ) from exc
+    resp = _post_completion(payload, what="画像解析モデル", model_id=resolved)
 
-    if not resp.ok:
-        raise LLMResponseError(
-            f"画像解析でLM Studioがエラーを返しました ({resp.status_code}): {resp.text[:300]}"
-        )
     try:
         return resp.json()["choices"][0]["message"]["content"]
     except (ValueError, KeyError, IndexError) as exc:
         raise LLMResponseError(
             f"画像解析の応答を解釈できませんでした: {resp.text[:300]}"
         ) from exc
+
+
+# LM Studio drops in-flight requests when it swaps a model (JIT loading, or
+# an idle model being unloaded and reloaded). It reports that as a 400 with
+# this body, which is indistinguishable from a client error by status code
+# alone - hence the body match. It is transient: the next request succeeds.
+_RELOAD_MARKERS = ("model reloaded", "model unloaded", "model is loading", "loading model")
+# 5xx from a local inference server is the same kind of "ask again" condition.
+_TRANSIENT_STATUSES = (500, 502, 503, 504)
+# A crashed model is a different thing from a reloading one: it will not
+# answer the next request either, so it is reported rather than retried.
+_CRASH_MARKERS = ("has crashed", "model crashed", "exit code")
+# One retry, not a loop. If the second attempt fails the same way, something
+# is actually wrong and burning another full timeout would only delay saying so.
+_MAX_TRANSIENT_RETRIES = 1
+# Long enough for LM Studio to finish swapping a model in, short enough that
+# a user watching the progress log does not think it has hung.
+_RETRY_BACKOFF_SECONDS = 3.0
+
+
+def _is_transient_response(resp: requests.Response) -> bool:
+    if resp.status_code in _TRANSIENT_STATUSES:
+        return True
+    if resp.status_code == 400:
+        body = (resp.text or "").casefold()
+        return any(marker in body for marker in _RELOAD_MARKERS)
+    return False
+
+
+def _post_completion(payload: dict, *, what: str, model_id: str) -> requests.Response:
+    """POSTs one chat completion, retrying only genuinely transient failures.
+
+    A timeout is deliberately *not* retried: the wait already cost
+    LLM_TIMEOUT seconds, and a second one would double a failure the user is
+    waiting on rather than fixing it. Reloads and connection resets are
+    retried, because for those the next attempt really does succeed.
+    """
+    url = f"{LLM_BASE_URL.rstrip('/')}/chat/completions"
+    attempt = 0
+    while True:
+        try:
+            resp = requests.post(url, json=payload, timeout=LLM_TIMEOUT)
+        except requests.Timeout as exc:
+            raise LLMTimeoutError(
+                f"{what}「{model_id}」からの応答が{LLM_TIMEOUT:.0f}秒以内に返りませんでした。"
+            ) from exc
+        except requests.ConnectionError as exc:
+            # LM Studio restarting, or the server toggled off mid-request.
+            if attempt < _MAX_TRANSIENT_RETRIES:
+                attempt += 1
+                logger.info(
+                    "LM Studio connection dropped (%s); retrying once in %.0fs",
+                    exc,
+                    _RETRY_BACKOFF_SECONDS,
+                )
+                time.sleep(_RETRY_BACKOFF_SECONDS)
+                continue
+            raise LLMUnavailableError(
+                f"LM Studioに接続できません ({LLM_BASE_URL})。"
+                "LM Studioを起動し、ローカルサーバーを有効にしてください。"
+            ) from exc
+        except requests.RequestException as exc:
+            raise LLMUnavailableError(
+                f"LM Studioに接続できません ({LLM_BASE_URL})。"
+                "LM Studioを起動し、ローカルサーバーを有効にしてください。"
+            ) from exc
+
+        if resp.ok:
+            return resp
+
+        if _is_transient_response(resp) and attempt < _MAX_TRANSIENT_RETRIES:
+            attempt += 1
+            logger.info(
+                "LM Studio returned a transient %s (%s); retrying once in %.0fs",
+                resp.status_code,
+                (resp.text or "")[:120],
+                _RETRY_BACKOFF_SECONDS,
+            )
+            time.sleep(_RETRY_BACKOFF_SECONDS)
+            continue
+
+        detail = (resp.text or "")[:300]
+        body = (resp.text or "").casefold()
+        if any(marker in body for marker in _CRASH_MARKERS):
+            raise LLMModelCrashedError(
+                f"AIモデル「{model_id}」がLM Studio側でクラッシュしました。"
+                "メモリ不足の可能性があります（動画の書き出しと同時に大きなモデルを"
+                "動かすと発生しやすくなります）。LM Studioでモデルを読み込み直すか、"
+                f"より小さいモデルに切り替えてください。 詳細: {detail}"
+            )
+        if _is_transient_response(resp):
+            raise LLMResponseError(
+                f"LM Studioがモデルの再読み込み中で応答できませんでした ({resp.status_code})。"
+                "再試行しても同じ状態でした。LM Studioでモデルがロード済みか確認してください。"
+                f" 詳細: {detail}"
+            )
+        raise LLMResponseError(f"LM Studioがエラーを返しました ({resp.status_code}): {detail}")
 
 
 def chat_completion(messages: list[dict], temperature: float = 0.2) -> str:
@@ -352,23 +466,8 @@ def chat_completion(messages: list[dict], temperature: float = 0.2) -> str:
     status = get_status()
     model_id = status.configured_model or ""
 
-    url = f"{LLM_BASE_URL.rstrip('/')}/chat/completions"
     payload = {"model": model_id, "messages": messages, "temperature": temperature}
-
-    try:
-        resp = requests.post(url, json=payload, timeout=LLM_TIMEOUT)
-    except requests.Timeout as exc:
-        raise LLMTimeoutError(
-            f"AIモデル「{model_id}」からの応答が{LLM_TIMEOUT:.0f}秒以内に返りませんでした。"
-        ) from exc
-    except requests.RequestException as exc:
-        raise LLMUnavailableError(
-            f"LM Studioに接続できません ({LLM_BASE_URL})。"
-            "LM Studioを起動し、ローカルサーバーを有効にしてください。"
-        ) from exc
-
-    if not resp.ok:
-        raise LLMResponseError(f"LM Studioがエラーを返しました ({resp.status_code}): {resp.text[:300]}")
+    resp = _post_completion(payload, what="AIモデル", model_id=model_id)
 
     try:
         body = resp.json()

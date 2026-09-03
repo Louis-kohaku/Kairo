@@ -31,6 +31,7 @@ def init_db() -> None:
     from app.models import (  # noqa: F401
         generation,
         job,
+        library,
         media_asset,
         perf_record,
         production,
@@ -38,6 +39,7 @@ def init_db() -> None:
         studio,
         subtitle,
         timeline,
+        trend,
     )
 
     Base.metadata.create_all(bind=engine)
@@ -94,6 +96,18 @@ _NEW_COLUMNS = {
         ("material_mode", "TEXT"),
         ("selected_asset_ids", "TEXT"),
         ("material_plan_json", "TEXT"),
+        # 動画制作エージェント: the agent's own record of what it decided and
+        # what it found. Each is a serialised pydantic model from
+        # app/schemas (trend.py / production_assets.py / review.py), stored
+        # as text so the shape can evolve without a migration, and all
+        # nullable so runs made before the agent existed still load.
+        ("trend_json", "TEXT"),
+        ("assets_json", "TEXT"),
+        ("review_json", "TEXT"),
+        ("report_json", "TEXT"),
+        ("variants_json", "TEXT"),
+        ("iteration", "INTEGER"),
+        ("best_score", "REAL"),
     ],
 }
 
@@ -119,6 +133,7 @@ _BACKFILL = (
     "UPDATE production_runs SET material_mode = 'ai_auto' WHERE material_mode IS NULL",
     "UPDATE scenes SET material_origin = '' WHERE material_origin IS NULL",
     "UPDATE scenes SET material_note = '' WHERE material_note IS NULL",
+    "UPDATE production_runs SET iteration = 0 WHERE iteration IS NULL",
 )
 
 

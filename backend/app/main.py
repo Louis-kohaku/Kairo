@@ -9,6 +9,7 @@ from app.api import (
     cut,
     generation,
     jobs,
+    library,
     materials,
     media,
     production,
@@ -18,11 +19,13 @@ from app.api import (
     subtitles,
     system,
     timeline,
+    trends,
 )
 from app.core.config import CORS_ORIGINS, ensure_data_dirs
 from app.core.db import init_db
+from app.services.trends import worker as trend_worker
 
-app = FastAPI(title="Kairo", version="0.1.0")
+app = FastAPI(title="動画制作エージェント Kairo", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,12 +55,24 @@ app.include_router(system.router)
 app.include_router(ai.router)
 app.include_router(settings.router)
 app.include_router(studio.router)
+app.include_router(trends.router)
+app.include_router(library.router)
 
 
 @app.on_event("startup")
 def on_startup() -> None:
     ensure_data_dirs()
     init_db()
+    # Trend Intelligence collects in the background from startup. It is
+    # started here rather than lazily on first use so the store is already
+    # filling by the time the user asks for a video, which is the whole
+    # point of accumulating instead of searching on demand.
+    trend_worker.start()
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    await trend_worker.stop()
 
 
 @app.get("/api/health")

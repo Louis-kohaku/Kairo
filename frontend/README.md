@@ -1,32 +1,71 @@
-# React + TypeScript + Vite
+# 動画制作エージェント Kairo — フロントエンド
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React 19 + TypeScript + Vite。バックエンド (FastAPI) の API を呼び出す単一ページアプリです。
 
-Currently, two official plugins are available:
+通常はリポジトリルートから起動してください。フロントエンド単体では、バックエンドが動いていないとほぼすべての画面が空になります。
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```powershell
+# リポジトリルートで（バックエンド + フロントエンドを同時起動）
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+このディレクトリ単体で動かす場合:
+
+```powershell
+npm run dev      # 開発サーバー (http://localhost:5173)
+npm run build    # 型チェック (tsc -b) + 本番ビルド
+npm run lint     # oxlint
+```
+
+## 構成
+
+ルーティングライブラリは使っていません。`src/App.tsx` の1つの `View` ユニオンで画面を切り替えます（Home / プロジェクト作成 / Studio / Editor / Settings）。制作モードは Studio 画面の中の状態であって別ページではありません — Full Auto と AI Co-Creation は「同じ制作にチャットが開いているかどうか」の違いだからです。
+
+```
+src/
+├── App.tsx                  # 画面切り替え（ルーターは使わない）
+├── api/client.ts            # バックエンドAPIの唯一の呼び出し口
+├── types.ts                 # バックエンドのPydanticスキーマに対応する型定義
+├── pages/
+│   ├── Home.tsx              # プロジェクト一覧・制作モード選択
+│   ├── Studio.tsx            # AI制作スタジオ（進捗/プレビュー/素材/シーン/品質/レビュー/AIの判断/調査）
+│   ├── Editor.tsx            # 手動編集（タイムライン・字幕・書き出し）
+│   └── SettingsPage.tsx      # 設定（AI/動画/性能/TTS/字幕/生成/トレンド/素材ライブラリ/接続サービス）
+├── components/
+│   ├── studio/                # 制作スタジオの各パネル
+│   │   ├── ProductionProgress.tsx   # 23工程の進捗
+│   │   ├── AIActivity.tsx            # 「AIが今なにをしているか」
+│   │   ├── QualityPanel.tsx          # 品質チェック（書き出し前・構成の点検）
+│   │   ├── VideoReviewPanel.tsx      # 完成動画レビュー（書き出し後・実測採点）
+│   │   ├── AgentDecisionsPanel.tsx   # 使用トレンド・選定素材・選定理由・ライセンス
+│   │   └── ...
+│   ├── settings/              # 設定画面のタブ
+│   │   ├── TrendSettingsTab.tsx      # トレンド収集の状態と設定
+│   │   ├── LibraryTab.tsx             # 素材ライブラリとライセンス管理
+│   │   └── ConnectedServicesTab.tsx   # 接続サービス一覧と自動改善ループ設定
+│   └── ...
+├── hooks/                    # ジョブ/制作ランのポーリング、素材の取得
+├── utils/                    # 時刻整形・見積り・タイムライン計算
+├── index.css                 # 全体のスタイル（CSS変数で配色を定義）
+└── studio.css                # 制作スタジオ固有のスタイル
+```
+
+## 設計上の約束
+
+**APIは `src/api/client.ts` を通す。** コンポーネントから直接 `fetch` しないでください。エラーメッセージの整形（バックエンドが返す構造化された `detail` を握り潰さない処理）がここに集約されています。
+
+**根拠のない数値を表示しない。** 完成動画レビューの各スコアには「実測 / 構成から / AI判断」の別が必ず併記されます。同様に、ジャンル傾向には「トレンドから分析」か「Kairo組み込みの定石」かが必ず表示されます。数値だけを見せて根拠を隠す表示は追加しないでください。
+
+**できないことは「できない」と表示する。** 素材が選べなかった、ライセンスが確認できなかった、テンポが検出できなかった — これらは行を消すのではなく、理由つきで表示します。空欄は「問題なし」と読まれてしまうためです。
+
+## 環境変数
+
+`frontend/.env`（`.env.example` からコピー）:
+
+| 変数名 | デフォルト | 説明 |
+|---|---|---|
+| `VITE_API_BASE` | `http://127.0.0.1:8756` | バックエンドAPIのURL |
+
+Vite の仕様上、`VITE_` で始まる変数だけがブラウザ側のコードから参照できます。
+
+詳細はリポジトリルートの [README.md](../README.md) を参照してください。

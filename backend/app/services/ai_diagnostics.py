@@ -217,6 +217,84 @@ def diagnose_llm_status(
     return diag
 
 
+
+def _diagnose_llm_timeout(exc: Exception, context: "AIContext | None") -> Diagnosis:
+    """A timeout, explained with what Kairo can actually observe.
+
+    "The model may be too large" is true of every timeout and tells the user
+    nothing they can act on. These two extra checks are cheap, specific, and
+    were both the real cause in a production run that failed here: a vision
+    model doing text generation, and LM Studio reloading a model between
+    requests.
+    """
+    facts = [
+        "LM Studioサーバーには接続できました。",
+        f"待機時間の上限: {llm_client.LLM_TIMEOUT:.0f}秒",
+        str(exc),
+    ]
+    candidates = [
+        "モデルが大きすぎる(より小さいモデルなら高速に動作します)",
+        "GPUではなくCPUで実行されている",
+        "他の重い処理がPCのリソースを使っている",
+    ]
+    suggestions = [
+        Suggestion("より小さい/高速なモデルに切り替える", "open_ai_settings"),
+        Suggestion("この工程から再開する", "retry"),
+        Suggestion("環境変数 KAIRO_LLM_TIMEOUT を延ばす", "view_log"),
+    ]
+    cause = (
+        "LM Studioには接続できていますが、生成が制限時間内に終わりませんでした。"
+        "モデルのサイズに対してPCの処理能力が足りていない可能性があります。"
+    )
+
+    model_id = (context.model if context else "") or ""
+    if not model_id:
+        try:
+            model_id = llm_client.get_status().configured_model or ""
+        except Exception:  # noqa: BLE001 - diagnosis must never raise
+            model_id = ""
+
+    # A VL/vision model generating a script is a specific, checkable cause:
+    # the image encoder is loaded and the model is markedly slower at plain
+    # text than a same-size text-only model.
+    if model_id and llm_client.is_vision_model(model_id):
+        cause = (
+            f"現在ロードされているのは画像対応モデル「{model_id}」です。"
+            "画像対応モデルは同じサイズのテキスト専用モデルより文章生成が遅く、"
+            "脚本やシーン設計のような長い生成では制限時間を超えやすくなります。"
+        )
+        candidates.insert(0, "画像対応(Vision)モデルで文章生成している")
+        suggestions.insert(
+            0,
+            Suggestion(
+                "テキスト専用モデルを併せてロードする(素材解析だけVisionモデルが使われます)",
+                "open_ai_settings",
+            ),
+        )
+        facts.append(f"使用モデル「{model_id}」は画像対応モデルとして検出されました。")
+
+    # LM Studio unloads idle models and reloads them on the next request.
+    # The reload happens *inside* the request Kairo is waiting on, so the
+    # first call after a pause can take far longer than a warm one.
+    candidates.append(
+        "LM Studioがモデルを一度解放し、この要求の中で読み込み直した"
+        "(アイドル時の自動アンロード)"
+    )
+    suggestions.append(
+        Suggestion("LM Studioの設定でモデルの自動アンロード(idle TTL)を無効にする", "view_log")
+    )
+
+    return Diagnosis(
+        summary="AIモデルの応答が時間内に返りませんでした。",
+        category="model",
+        cause_known=True,
+        cause=cause,
+        facts=facts,
+        candidates=candidates,
+        suggestions=suggestions,
+    )
+
+
 def diagnose(
     exc: Exception, *, context: AIContext | None = None, step: str | None = None
 ) -> Diagnosis:
@@ -264,36 +342,36 @@ def diagnose(
     if isinstance(exc, llm_client.LLMNotReadyError):
         return _finish(diagnose_llm_status(exc.status, context=context), exc, context, step)
 
-    if isinstance(exc, llm_client.LLMTimeoutError):
+    if isinstance(exc, llm_client.LLMModelCrashedError):
         return _finish(
             Diagnosis(
-                summary="AIモデルの応答が時間内に返りませんでした。",
+                summary="AIモデルがLM Studio側でクラッシュしました。",
                 category="model",
                 cause_known=True,
                 cause=(
-                    "LM Studioには接続できていますが、生成が制限時間内に終わりませんでした。"
-                    "モデルのサイズに対してPCの処理能力が足りていない可能性があります。"
+                    "LM Studioに接続はできましたが、モデルのプロセスが停止しました。"
+                    "メモリ不足が最も多い原因です。動画の書き出し(FFmpeg)と大きなモデルを"
+                    "同時に動かすと、この環境では発生しやすくなります。"
                 ),
-                facts=[
-                    "LM Studioサーバーには接続できました。",
-                    f"待機時間の上限: {llm_client.LLM_TIMEOUT:.0f}秒",
-                    str(exc),
-                ],
+                facts=["LM Studioサーバーには接続できました。", str(exc)],
                 candidates=[
-                    "モデルが大きすぎる(より小さいモデルなら高速に動作します)",
-                    "GPUではなくCPUで実行されている",
-                    "他の重い処理がPCのリソースを使っている",
+                    "モデルに対して空きメモリが足りていない",
+                    "書き出しなど他の重い処理と同時に実行した",
+                    "モデルファイルまたはランタイムの不具合",
                 ],
                 suggestions=[
-                    Suggestion("より小さい/高速なモデルに切り替える", "open_ai_settings"),
+                    Suggestion("LM Studioでモデルを読み込み直す", "open_ai_settings"),
+                    Suggestion("より小さいモデルに切り替える", "open_ai_settings"),
                     Suggestion("この工程から再開する", "retry"),
-                    Suggestion("環境変数 KAIRO_LLM_TIMEOUT を延ばす", "view_log"),
                 ],
             ),
             exc,
             context,
             step,
         )
+
+    if isinstance(exc, llm_client.LLMTimeoutError):
+        return _finish(_diagnose_llm_timeout(exc, context), exc, context, step)
 
     if isinstance(exc, llm_client.LLMUnavailableError):
         return _finish(

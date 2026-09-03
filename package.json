@@ -2,7 +2,7 @@
   "name": "kairo",
   "private": true,
   "version": "0.1.0",
-  "description": "Kairo - ローカルAI動画編集ツール (dev/build/start orchestration for backend + frontend)",
+  "description": "動画制作エージェント Kairo - ローカル完結の自律型動画制作エージェント (dev/build/start orchestration for backend + frontend)",
   "type": "module",
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

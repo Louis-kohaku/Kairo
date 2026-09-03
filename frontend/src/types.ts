@@ -361,6 +361,27 @@ export interface PerformanceSettingsT {
   custom: PerformanceCustomOverrides | null;
 }
 
+export interface TrendSettingsT {
+  enabled: boolean;
+  region: string;
+  interval_minutes: number;
+  sources: string[];
+  use_in_production: boolean;
+  max_signals_per_source: number;
+}
+
+export interface LibrarySettingsT {
+  auto_download_fonts: boolean;
+  prefer_commercial_safe: boolean;
+}
+
+export interface RefinementSettingsT {
+  enabled: boolean;
+  max_iterations: number;
+  target_score: number;
+  min_gain: number;
+}
+
 export interface AppSettings {
   ai: AISettingsT;
   video: VideoSettingsT;
@@ -368,6 +389,9 @@ export interface AppSettings {
   tts: TTSSettingsT;
   subtitle: SubtitleSettingsT;
   generation: GenerationSettingsT;
+  trends: TrendSettingsT;
+  library: LibrarySettingsT;
+  refinement: RefinementSettingsT;
 }
 
 export interface AppSettingsPatch {
@@ -377,6 +401,9 @@ export interface AppSettingsPatch {
   tts?: Partial<TTSSettingsT> & { clear_selected_voice?: boolean };
   subtitle?: Partial<SubtitleSettingsT>;
   generation?: Partial<GenerationSettingsT> & { clear_default_engine_id?: boolean };
+  trends?: Partial<TrendSettingsT>;
+  library?: Partial<LibrarySettingsT>;
+  refinement?: Partial<RefinementSettingsT>;
 }
 
 export interface TTSVoice {
@@ -649,6 +676,16 @@ export interface ProductionRun {
   quality: QualityReport | null;
   improvement: ImprovementReport | null;
   model_plan: ModelPlan | null;
+  // 動画制作エージェント: what the run knew, chose and thought of the result.
+  // Null on runs produced before the agent existed, and on any run that has
+  // not reached the phase that fills the field.
+  trend: TrendContext | null;
+  assets: AssetDecisions | null;
+  review: VideoReview | null;
+  report: ProductionReport | null;
+  variants: VariantResult | null;
+  iteration: number;
+  best_score: number | null;
   scene_count: number;
   created_at: string | null;
   updated_at: string | null;
@@ -835,4 +872,380 @@ export interface ApplyResult {
   skipped: string[];
   rebuilt_scenes: number[];
   total_seconds: number;
+}
+
+/* -------------------------------------------------------------------------
+ * 動画制作エージェント: Trend Intelligence, the Creative Asset Library,
+ * the AI Video Reviewer, and the connected-services view.
+ * ---------------------------------------------------------------------- */
+
+export interface TrendSignal {
+  id: string;
+  platform: string;
+  keyword: string;
+  category: string;
+  category_label: string;
+  region: string;
+  score: number;
+  growth_rate: number;
+  observation_count: number;
+  observed_at: string | null;
+  expires_at: string | null;
+  source: string;
+  source_url: string;
+  metadata: Record<string, unknown>;
+  /** Score after time decay - what the planner actually ranks on. */
+  effective_score: number;
+  stale: boolean;
+}
+
+export interface GenreProfileData {
+  genre: string;
+  label: string;
+  duration_seconds: number | null;
+  scene_seconds: number | null;
+  hook_seconds: number | null;
+  hook_patterns: string[];
+  opening_patterns: string[];
+  cut_tempo: string;
+  subtitle_density: string;
+  subtitle_position: string;
+  subtitle_style: string;
+  font_style: string[];
+  bgm_mood: string;
+  bgm_bpm_range: number[];
+  sfx_usage: string[];
+  transitions: string[];
+  title_patterns: string[];
+  cta_patterns: string[];
+  hashtags: string[];
+  notes: string;
+  evidence: string[];
+}
+
+export interface TrendSourceStatus {
+  id: string;
+  label: string;
+  kind: string;
+  enabled: boolean;
+  configured: boolean;
+  requires_key: boolean;
+  key_env: string;
+  endpoint: string;
+  terms_url: string;
+  note: string;
+  last_ok: string | null;
+  last_error: string;
+  last_count: number;
+}
+
+export interface TrendOverview {
+  enabled: boolean;
+  region: string;
+  interval_minutes: number;
+  last_run_at: string | null;
+  last_run_status: string;
+  next_run_at: string | null;
+  total_signals: number;
+  fresh_signals: number;
+  sources: TrendSourceStatus[];
+  top: TrendSignal[];
+  by_category: Record<string, number>;
+}
+
+export interface TrendContext {
+  used: boolean;
+  reason: string;
+  genre: string;
+  genre_label: string;
+  region: string;
+  signals: TrendSignal[];
+  profile: GenreProfileData | null;
+  /** "llm" = analysed from collected signals; "defaults" = built-in convention. */
+  profile_source: string;
+  collected_at: string | null;
+}
+
+export interface GenreBreakdown {
+  genre: string;
+  label: string;
+  count: number;
+  signals: TrendSignal[];
+  profile: GenreProfileData;
+  derived_from: string;
+  sample_size: number;
+  updated_at: string | null;
+}
+
+export interface LicenseRef {
+  id: string;
+  name: string;
+  status: string;
+  status_label: string;
+  url: string;
+  attribution_required: boolean;
+  attribution: string;
+  commercial_use: boolean;
+}
+
+export interface LicenseInfo {
+  id: string;
+  name: string;
+  url: string;
+  status: string;
+  status_label: string;
+  commercial_use: boolean;
+  attribution_required: boolean;
+  redistribution: boolean;
+  summary: string;
+}
+
+export interface LibraryAsset {
+  id: string;
+  kind: "font" | "music" | "sfx";
+  name: string;
+  family: string;
+  path: string;
+  is_system: boolean;
+  available: boolean;
+  category: string;
+  mood: string;
+  source: string;
+  source_url: string;
+  license: LicenseRef & { file: string; summary: string };
+  auto_usable: boolean;
+  languages: string[];
+  styles: string[];
+  genres: string[];
+  weight: number;
+  readability: number | null;
+  supports_japanese: boolean;
+  supports_latin: boolean;
+  duration: number | null;
+  bpm: number | null;
+  loudness_lufs: number | null;
+  analysis_status: string;
+  analysis_error: string;
+  notes: string;
+}
+
+export interface LibraryKindSummary {
+  total: number;
+  available: number;
+  auto_usable: number;
+  by_status: Record<string, number>;
+}
+
+export interface LibraryOverview {
+  summary: Record<string, LibraryKindSummary>;
+  roots: { fonts: string; music: string; sfx: string };
+  settings: { auto_download_fonts: boolean; prefer_commercial_safe: boolean };
+  licenses: LicenseInfo[];
+  status_labels: Record<string, string>;
+  sfx_import_only: string[];
+}
+
+export interface FontCatalogEntry {
+  id: string;
+  family: string;
+  languages: string[];
+  license_id: string;
+  note: string;
+  variable_only: boolean;
+  source: string;
+  source_url: string;
+  installed: boolean;
+}
+
+export interface AssetChoice {
+  kind: string;
+  found: boolean;
+  asset_id: string;
+  name: string;
+  family: string;
+  path: string;
+  category: string;
+  source: string;
+  source_url: string;
+  reason: string;
+  reasons: string[];
+  score: number;
+  license: LicenseRef;
+  bpm: number | null;
+  duration: number | null;
+  loudness_lufs: number | null;
+  considered: number;
+  rejected_for_license: number;
+  unavailable_reason: string;
+}
+
+export interface SfxPlacement {
+  at: number;
+  category: string;
+  asset_id: string;
+  name: string;
+  trigger: string;
+  scene_index: number | null;
+  gain: number;
+  reason: string;
+}
+
+export interface BeatSyncResult {
+  applied: boolean;
+  reason: string;
+  bpm: number | null;
+  bpm_source: string;
+  beat_seconds: number | null;
+  beats_per_cut: number;
+  adjusted_scenes: number;
+  total_drift_seconds: number;
+  cut_points: number[];
+}
+
+export interface SubtitleDecision {
+  font: string;
+  size: number;
+  position: string;
+  style: string;
+  color: string;
+  max_chars_per_line: number;
+  reason: string;
+  from_trend_profile: boolean;
+}
+
+export interface AssetDecisions {
+  genre: string;
+  genre_label: string;
+  font: AssetChoice | null;
+  music: AssetChoice | null;
+  sfx: SfxPlacement[];
+  sfx_assets: AssetChoice[];
+  subtitle: SubtitleDecision | null;
+  beat_sync: BeatSyncResult;
+  notes: string[];
+}
+
+export interface AxisScore {
+  axis: string;
+  label: string;
+  score: number;
+  /** measured = read from the file, planned = from the scene design, ai = model. */
+  basis: string;
+  detail: string;
+}
+
+export interface ReviewFinding {
+  axis: string;
+  severity: "info" | "minor" | "major";
+  problem: string;
+  cause: string;
+  suggestion: string;
+  fix: string | null;
+  fix_value: number | null;
+  scene_index: number | null;
+}
+
+export interface VideoReview {
+  performed: boolean;
+  iteration: number;
+  overall_score: number;
+  axes: AxisScore[];
+  findings: ReviewFinding[];
+  strengths: string[];
+  summary: string;
+  measured: Record<string, unknown>;
+  reviewed_by: string;
+  output_path: string;
+  error: string;
+}
+
+export interface IterationRecord {
+  iteration: number;
+  score: number;
+  changes: string[];
+  output_path: string;
+  adopted: boolean;
+  note: string;
+}
+
+export interface VariantRecord {
+  id: string;
+  label: string;
+  strategy_note: string;
+  score: number;
+  output_path: string;
+  best: boolean;
+}
+
+export interface VariantResult {
+  variants: VariantRecord[];
+  best_id: string;
+  error: string;
+}
+
+export interface VariantSpec {
+  id: string;
+  label: string;
+  note: string;
+  tempo_scale: number;
+}
+
+export interface ProductionReport {
+  project_id: string;
+  project_name: string;
+  run_id: string;
+  title: string;
+  genre: string;
+  genre_label: string;
+  instruction: string;
+  duration_seconds: number;
+  orientation: string;
+  resolution: string;
+  llm_provider: string;
+  llm_endpoint: string;
+  llm_model: string;
+  transcription_engine: string;
+  tts_engine: string;
+  rendering_engine: string;
+  trend_used: boolean;
+  trend_reason: string;
+  trend_sources: string[];
+  trend_keywords: string[];
+  genre_profile_source: string;
+  font: string;
+  font_license: string;
+  music: string;
+  music_license: string;
+  sfx: string[];
+  attribution: string[];
+  review: VideoReview | null;
+  iterations: IterationRecord[];
+  final_score: number;
+  output_path: string;
+  assets_used_path: string;
+  generated_at: string;
+}
+
+export interface ConnectedService {
+  id: string;
+  category: string;
+  label: string;
+  purpose: string;
+  connection: string;
+  endpoint: string;
+  model: string;
+  auth: string;
+  cost: string;
+  state: "connected" | "not_connected" | "not_configured" | "unavailable" | "disabled";
+  detail: string;
+  remedy: string;
+  files: string[];
+  terms_url: string;
+}
+
+export interface ConnectedServices {
+  services: ConnectedService[];
+  by_category: Record<string, ConnectedService[]>;
+  counts: { connected: number; total: number };
+  note: string;
 }

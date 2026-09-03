@@ -224,6 +224,15 @@ def assemble(db, project: Project, scenes: list[Scene], bgm_asset: MediaAsset | 
         total += out_point
 
     if audio_track is not None:
+        # The BGM clip's volume is a decision someone made - the refinement
+        # loop raising a too-quiet mix, or the user dragging the fader - and
+        # rebuilding the track must not silently discard it. Re-assembly
+        # happens on every duration change, so resetting to 1.0 here made
+        # "BGM音量を上げる" a change that never reached a rendered file.
+        previous_volume = 1.0
+        existing = db.query(Clip).filter(Clip.track_id == audio_track.id).first()
+        if existing is not None:
+            previous_volume = existing.volume
         clear_track(db, audio_track)
         if bgm_asset is not None:
             timeline_service.add_clip(
@@ -232,7 +241,7 @@ def assemble(db, project: Project, scenes: list[Scene], bgm_asset: MediaAsset | 
                 bgm_asset.id,
                 0.0,
                 min(bgm_asset.duration, max(0.5, total)),
-                1.0,
+                previous_volume,
                 None,
             )
 

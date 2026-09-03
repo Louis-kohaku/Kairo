@@ -150,12 +150,40 @@ def generate_strategy(
 # ----------------------------------------------------------------- plan
 
 
+
+# How many acts a video of a given length should be built from.
+#
+# Each act is one scene-design request to the local model, and on a CPU-only
+# machine that is the single most expensive thing a production does. It is
+# also a structural question: a 30-second short split five ways gives acts of
+# six seconds, which is one shot rather than an act. Both arguments point the
+# same way, so the count follows the target duration.
+_ACT_RANGES: tuple[tuple[float, int, int], ...] = (
+    (20.0, 2, 2),    # up to 20s: 掴み + 本編
+    (45.0, 2, 3),    # a typical short
+    (90.0, 3, 4),
+    (float("inf"), 3, 5),
+)
+
+
+def act_range(duration_seconds: float) -> tuple[int, int]:
+    """(minimum, maximum) acts for a video of this length."""
+    for limit, low, high in _ACT_RANGES:
+        if duration_seconds <= limit:
+            return low, high
+    return 3, 5
+
+
 def _plan_prompt(
     instruction: str,
     strategy: ProductionStrategy,
     duration_seconds: float,
     material_hint: str = "",
 ) -> list[dict]:
+    low, high = act_range(duration_seconds)
+    act_rule = (
+        f"- 幕はちょうど{low}個。" if low == high else f"- 幕は{low}〜{high}個。"
+    )
     system = (
         "あなたはショート動画の構成作家です。制作戦略に沿って、動画全体の企画と"
         "「幕(チャプター)」構成をJSONで出力してください。JSONオブジェクトのみを返してください。\n\n"
@@ -163,9 +191,11 @@ def _plan_prompt(
         '{"title": "...", "target_audience": "...", "tone": "...", '
         '"chapters": [{"title": "...", "summary": "...", "seconds": 12}, ...]}\n\n'
         "制約:\n"
-        "- 幕は3〜5個。必ず「掴み」から始め、最後は「オチ/余韻」で終わること。\n"
+        + act_rule
+        + "必ず「掴み」から始め、最後は「オチ/余韻」で終わること。\n"
         "- 各幕の seconds の合計が目標尺とほぼ一致すること。\n"
-        "- 最初の幕は3〜6秒程度の短い掴みにすること。"
+        "- 最初の幕は3〜6秒程度の短い掴みにすること。\n"
+        "- 幕を増やして細切れにするより、1つの幕を長くしてください。"
     )
     user = (
         f"依頼: {instruction}\n"
@@ -202,7 +232,31 @@ def generate_plan(
     except ValidationError as exc:
         raise PlanningError(f"企画の形式が不正です: {exc}") from exc
 
-    raw_chapters = data.get("chapters", [])
+    # Trust but verify, exactly as the seconds budget below is verified: a
+    # model that ignores the act limit would otherwise cost one extra
+    # scene-design request per surplus act. Surplus acts are *merged into
+    # the last one*, never dropped - the final act carries the ending, and
+    # discarding it would throw away the part the strategy cares most about.
+    _low, high = act_range(duration_seconds)
+    raw_chapters = list(data.get("chapters", []))
+    if len(plan.chapters) > high:
+        merged_titles = [c.title for c in plan.chapters[high - 1 :]]
+        merged_summaries = [c.summary for c in plan.chapters[high - 1 :] if c.summary]
+        keep = plan.chapters[: high - 1]
+        tail = plan.chapters[high - 1]
+        tail.title = merged_titles[0]
+        tail.summary = " / ".join(merged_summaries)[:400]
+        plan.chapters = keep + [tail]
+        if len(raw_chapters) > high:
+            merged_seconds = 0.0
+            for chapter in raw_chapters[high - 1 :]:
+                if isinstance(chapter, dict):
+                    try:
+                        merged_seconds += float(chapter.get("seconds") or 0)
+                    except (TypeError, ValueError):
+                        pass
+            raw_chapters = raw_chapters[: high - 1] + [{"seconds": merged_seconds}]
+
     budgets: list[float] = []
     for i in range(len(plan.chapters)):
         value = 0.0

@@ -19,6 +19,7 @@ from app.models.job import Job
 from app.models.project import Project
 from app.models.subtitle import SubtitleCue
 from app.models.timeline import Clip, Track
+from app.schemas.settings import SubtitleSettings
 from app.services import ai_diagnostics, job_log, settings_service, subtitle_style
 from app.services.ffmpeg import compose, engine
 from app.services.srt import build_srt
@@ -59,12 +60,30 @@ def _segment_cache_path(
     return tmp_segments_dir(project_id) / key
 
 
-def run_render(project_id: str, job_id: str, burn_subtitles: bool = False, crf: int = 18) -> None:
+def run_render(
+    project_id: str,
+    job_id: str,
+    burn_subtitles: bool = False,
+    crf: int = 18,
+    subtitle_override: SubtitleSettings | None = None,
+    sfx: list[tuple[Path, float]] | None = None,
+) -> None:
+    """Renders a project's timeline to one MP4.
+
+    `subtitle_override` lets the production agent burn captions in the font
+    and style *it* chose for this video without writing those choices into
+    the user's global settings - a Settings screen that silently changed
+    because a run decided something would stop being a settings screen.
+    Manual renders pass nothing and behave exactly as before.
+
+    `sfx` is a list of (file, timestamp) pairs laid over the finished mix.
+    """
     db = SessionLocal()
     log_lines: list[str] = []
     current_step = "segment_normalization"
     try:
         app_settings = settings_service.get_settings()
+        subtitle_settings = subtitle_override or app_settings.subtitle
         # A global "字幕 OFF" in Settings always wins over the per-render
         # checkbox - it's meant to read as a real on/off switch, not a
         # suggestion.
@@ -174,7 +193,7 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False, crf: 
                 ass_path = work_dir / "burn.ass"
                 ass_path.write_text(
                     subtitle_style.build_ass(
-                        cues, app_settings.subtitle, project.width, project.height
+                        cues, subtitle_settings, project.width, project.height
                     ),
                     encoding="utf-8",
                 )
@@ -184,6 +203,26 @@ def run_render(project_id: str, job_id: str, burn_subtitles: bool = False, crf: 
                 engine.burn_subtitles(pre_subtitle_path, ass_path, final_path, crf=crf)
             else:
                 pre_subtitle_path.replace(final_path)
+
+        if sfx:
+            current_step = "sfx_overlay"
+            _update_job(job_id, progress=97.0, message="Overlaying sound effects", step=current_step)
+            usable = [(Path(path), at) for path, at in sfx if Path(path).exists()]
+            if usable:
+                # Overlaid last, onto the finished mix, because the effects
+                # are positioned against the final timeline - doing it
+                # before the concat would mean re-deriving every timestamp
+                # per segment.
+                with_sfx = work_dir / "with_sfx.mp4"
+                try:
+                    compose.overlay_sfx(final_path, usable, with_sfx)
+                    with_sfx.replace(final_path)
+                    log_lines.append(f"overlaid {len(usable)} sfx")
+                except Exception as exc:  # noqa: BLE001
+                    # An effect that will not mix is not worth losing the
+                    # render over; the video without it is still the video.
+                    logger.warning("SFX overlay failed, keeping clean mix: %s", exc)
+                    log_lines.append(f"sfx overlay skipped: {exc}")
 
         rel_output = f"renders/{job_id}.mp4"
         _update_job(

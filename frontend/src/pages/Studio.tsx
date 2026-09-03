@@ -19,6 +19,8 @@ import ModelPlanPanel from "../components/studio/ModelPlanPanel";
 import StudioLauncher from "../components/studio/StudioLauncher";
 import CoCreationChat from "../components/studio/CoCreationChat";
 import QualityPanel from "../components/studio/QualityPanel";
+import VideoReviewPanel from "../components/studio/VideoReviewPanel";
+import AgentDecisionsPanel from "../components/studio/AgentDecisionsPanel";
 import ResearchPanel from "../components/studio/ResearchPanel";
 import SceneBoard from "../components/studio/SceneBoard";
 import MaterialPanel from "../components/studio/MaterialPanel";
@@ -39,6 +41,8 @@ type Tab =
   | "usage"
   | "scenes"
   | "quality"
+  | "review"
+  | "decisions"
   | "research";
 
 const TABS: { id: Tab; label: string }[] = [
@@ -48,6 +52,10 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "usage", label: "使用素材" },
   { id: "scenes", label: "シーン" },
   { id: "quality", label: "品質" },
+  // The rendered file's own score, kept apart from "品質" (which reviews the
+  // plan) because the two genuinely can disagree.
+  { id: "review", label: "完成動画レビュー" },
+  { id: "decisions", label: "AIの判断" },
   { id: "research", label: "調査・戦略" },
 ];
 
@@ -91,6 +99,7 @@ export default function Studio({
   const [reevalBusy, setReevalBusy] = useState(false);
   const [reevalNotice, setReevalNotice] = useState<string | null>(null);
   const [usageKey, setUsageKey] = useState(0);
+  const [variantBusy, setVariantBusy] = useState(false);
   // Section 37: available on demand, never cluttering the production view.
   const [showSystem, setShowSystem] = useState(false);
 
@@ -478,6 +487,49 @@ export default function Studio({
                 onChanged={refreshProject}
               />
             </div>
+          )}
+
+          {tab === "review" && (
+            <VideoReviewPanel
+              review={run?.review ?? null}
+              report={run?.report ?? null}
+              iteration={run?.iteration ?? 0}
+              bestScore={run?.best_score ?? null}
+              variants={run?.variants ?? null}
+              variantBusy={variantBusy}
+              onGenerateVariants={
+                run && run.status !== "running"
+                  ? async () => {
+                      setVariantBusy(true);
+                      setError(null);
+                      try {
+                        const { job_id } = await api.startVariants(projectId);
+                        // Each variant is a full re-encode, so this polls the
+                        // job rather than holding the request open.
+                        for (;;) {
+                          await new Promise((resolve) => setTimeout(resolve, 3000));
+                          const job = await api.getJob(job_id);
+                          if (job.status === "completed") break;
+                          if (job.status === "failed") {
+                            setError(job.error ?? "バリエーションの作成に失敗しました");
+                            break;
+                          }
+                        }
+                        await refreshRun();
+                        await refreshProject();
+                      } catch (e) {
+                        setError(String(e));
+                      } finally {
+                        setVariantBusy(false);
+                      }
+                    }
+                  : undefined
+              }
+            />
+          )}
+
+          {tab === "decisions" && (
+            <AgentDecisionsPanel trend={run?.trend ?? null} assets={run?.assets ?? null} />
           )}
 
           {tab === "quality" && (

@@ -78,6 +78,57 @@ class PerformanceSettings(BaseModel):
     custom: Optional[PerformanceCustomOverrides] = None
 
 
+class TrendSettings(BaseModel):
+    """Trend Intelligence: what the background collector does.
+
+    Off-by-default would make the feature invisible, but on-by-default with
+    a short interval would hammer someone else's servers, so the interval is
+    deliberately long: trending-search feeds update on the order of hours,
+    and a three-hour cadence keeps "現在のトレンド" true without being a
+    burden on the sources.
+    """
+
+    enabled: bool = True
+    region: str = "JP"
+    interval_minutes: int = 180
+    # Source ids from services/trends/sources.py. A source needing a key the
+    # user has not set stays listed here and reports itself as 未設定 rather
+    # than silently disappearing.
+    sources: list[str] = ["google_trends", "wikipedia", "youtube"]
+    # Whether production runs read the accumulated trend data. Separate from
+    # `enabled` so a user can keep collecting while producing a video that
+    # deliberately ignores what is trending.
+    use_in_production: bool = True
+    max_signals_per_source: int = 30
+
+
+class LibrarySettings(BaseModel):
+    """Creative asset library behaviour."""
+
+    # Downloading fonts is a network action that writes files, so it is
+    # opt-in. Scanning what is already installed is not, and always runs.
+    auto_download_fonts: bool = False
+    # Assets whose licence Kairo could not establish are never used in an
+    # automatic production. Flipping this off is not offered as a setting:
+    # it is the rule (design rule 13), not a preference.
+    prefer_commercial_safe: bool = True
+
+
+class RefinementSettings(BaseModel):
+    """The review -> improve -> re-review loop."""
+
+    enabled: bool = True
+    # Total quality passes over one production, including the first. 1 means
+    # "check and improve once" (the behaviour before this existed).
+    max_iterations: int = 2
+    # Stop early once the reviewer scores at least this. Prevents spending
+    # three re-renders improving a video that was already good.
+    target_score: float = 85.0
+    # Minimum score gain required to keep iterating; below it, further
+    # passes are churn and the best version so far is adopted.
+    min_gain: float = 2.0
+
+
 class AppSettings(BaseModel):
     ai: AISettings = AISettings()
     video: VideoSettings = VideoSettings()
@@ -85,6 +136,9 @@ class AppSettings(BaseModel):
     tts: TTSSettings = TTSSettings()
     subtitle: SubtitleSettings = SubtitleSettings()
     generation: GenerationSettings = GenerationSettings()
+    trends: TrendSettings = TrendSettings()
+    library: LibrarySettings = LibrarySettings()
+    refinement: RefinementSettings = RefinementSettings()
 
 
 class AISettingsPatch(BaseModel):
@@ -131,6 +185,27 @@ class PerformanceSettingsPatch(BaseModel):
     custom: Optional[PerformanceCustomOverrides] = None
 
 
+class TrendSettingsPatch(BaseModel):
+    enabled: Optional[bool] = None
+    region: Optional[str] = None
+    interval_minutes: Optional[int] = None
+    sources: Optional[list[str]] = None
+    use_in_production: Optional[bool] = None
+    max_signals_per_source: Optional[int] = None
+
+
+class LibrarySettingsPatch(BaseModel):
+    auto_download_fonts: Optional[bool] = None
+    prefer_commercial_safe: Optional[bool] = None
+
+
+class RefinementSettingsPatch(BaseModel):
+    enabled: Optional[bool] = None
+    max_iterations: Optional[int] = None
+    target_score: Optional[float] = None
+    min_gain: Optional[float] = None
+
+
 class AppSettingsPatch(BaseModel):
     ai: Optional[AISettingsPatch] = None
     video: Optional[VideoSettingsPatch] = None
@@ -138,3 +213,6 @@ class AppSettingsPatch(BaseModel):
     tts: Optional[TTSSettingsPatch] = None
     subtitle: Optional[SubtitleSettingsPatch] = None
     generation: Optional[GenerationSettingsPatch] = None
+    trends: Optional[TrendSettingsPatch] = None
+    library: Optional[LibrarySettingsPatch] = None
+    refinement: Optional[RefinementSettingsPatch] = None

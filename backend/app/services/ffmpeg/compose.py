@@ -276,18 +276,50 @@ _BGM_CHORDS: dict[str, list[tuple[float, float, float]]] = {
         (196.00, 246.94, 293.66), (174.61, 220.00, 261.63),
         (164.81, 207.65, 246.94), (146.83, 185.00, 220.00),
     ],
+    # Moods the genre profiles ask for (services/trends/genre.py). Added as
+    # real voicings rather than left to fall through to "gentle", so a
+    # profile that says "energetic" produces something that sounds it.
+    "warm": [
+        (233.08, 293.66, 349.23), (207.65, 261.63, 311.13),
+        (196.00, 246.94, 311.13), (174.61, 220.00, 277.18),
+    ],
+    "energetic": [
+        (293.66, 349.23, 440.00), (261.63, 329.63, 415.30),
+        (329.63, 392.00, 493.88), (246.94, 311.13, 392.00),
+    ],
+    "modern": [
+        (261.63, 311.13, 392.00), (233.08, 293.66, 349.23),
+        (207.65, 261.63, 329.63), (196.00, 246.94, 311.13),
+    ],
+    "neutral": [
+        (220.00, 261.63, 329.63), (196.00, 246.94, 293.66),
+        (207.65, 261.63, 311.13), (174.61, 220.00, 261.63),
+    ],
 }
 
 BGM_MOODS = tuple(_BGM_CHORDS)
 
 
-def synthesize_bgm(dest: Path, duration: float, mood: str = "gentle", chord_seconds: float = 3.2) -> None:
+def synthesize_bgm(
+    dest: Path,
+    duration: float,
+    mood: str = "gentle",
+    chord_seconds: float = 3.2,
+    bpm: float | None = None,
+) -> None:
     """Generates a soft instrumental bed of exactly `duration` seconds.
 
     Deliberately understated: a low-passed, slowly-tremolo'd triad pad with
     a little filtered air. It is background, and section 26 requires it not
     to fight the narration, so it is quiet at source as well as ducked at
     the mix.
+
+    With `bpm`, a soft percussive pulse is laid under the pad at that tempo.
+    That is what makes Beat Sync possible on Kairo's own music: the beat
+    grid of a generated bed is known exactly (it was placed, not detected),
+    and the cuts can be put on it. Without `bpm` the output is byte-for-byte
+    the pad this function has always produced, so nothing that already
+    depends on it changes.
     """
     duration = max(1.0, duration)
     chords = _BGM_CHORDS.get(mood, _BGM_CHORDS["gentle"])
@@ -326,12 +358,41 @@ def synthesize_bgm(dest: Path, duration: float, mood: str = "gentle", chord_seco
     ]
     chains.append(f"[{idx}:a]lowpass=f=900,volume=0.5[air]")
     labels.append("[air]")
+    idx += 1
 
+    if bpm and bpm > 0:
+        # One continuous expression rather than a click per beat: an
+        # exponentially-decaying envelope retriggered every beat period. A
+        # 40-second bed at 120 BPM would otherwise need 80 separate lavfi
+        # inputs, which overruns the command line long before it sounds
+        # like music.
+        period = 60.0 / float(bpm)
+        inputs += [
+            "-f", "lavfi",
+            "-t", f"{duration:.3f}",
+            "-i",
+            (
+                "aevalsrc="
+                f"0.5*sin(2*PI*62*t)*exp(-16*mod(t\,{period:.6f}))"
+                f"+0.25*sin(2*PI*180*t)*exp(-45*mod(t\,{period:.6f}))"
+                ":s=48000:d=" + f"{duration:.3f}"
+            ),
+        ]
+        chains.append(f"[{idx}:a]lowpass=f=2400,volume=0.32[pulse]")
+        labels.append("[pulse]")
+
+    # Normalised to a known integrated loudness instead of left at whatever
+    # the summed sine amplitudes happened to produce. Without this the bed
+    # measured around -33 LUFS at source, and after the render's 0.25 mix
+    # gain a music-only video came out near -42 LUFS - inaudible next to
+    # anything else on a phone. -16 LUFS leaves headroom for the sidechain
+    # ducking to still work under narration.
     mix = (
         "".join(labels)
         + f"amix=inputs={len(labels)}:duration=longest:normalize=0,"
         + "lowpass=f=2200,tremolo=f=0.25:d=0.12,"
-        + f"atrim=0:{duration:.3f},asetpts=N/SR/TB,volume=0.9[out]"
+        + f"atrim=0:{duration:.3f},asetpts=N/SR/TB,"
+        + "loudnorm=I=-16:TP=-1.5:LRA=11[out]"
     )
 
     args = [

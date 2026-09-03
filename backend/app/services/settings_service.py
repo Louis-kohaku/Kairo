@@ -101,6 +101,51 @@ def update_settings(patch: AppSettingsPatch) -> AppSettings:
             elif patch.generation.default_engine_id is not None:
                 current.generation.default_engine_id = patch.generation.default_engine_id
 
+        if patch.trends is not None:
+            for field in (
+                "enabled",
+                "region",
+                "sources",
+                "use_in_production",
+            ):
+                value = getattr(patch.trends, field)
+                if value is not None:
+                    setattr(current.trends, field, value)
+            # Clamped rather than validated-and-rejected: these are the
+            # cadence of outbound requests to someone else's servers, and a
+            # 1-minute poll would be abusive regardless of what a client
+            # sent. 30 minutes is the floor, a week the ceiling.
+            if patch.trends.interval_minutes is not None:
+                current.trends.interval_minutes = max(
+                    30, min(int(patch.trends.interval_minutes), 10080)
+                )
+            if patch.trends.max_signals_per_source is not None:
+                current.trends.max_signals_per_source = max(
+                    5, min(int(patch.trends.max_signals_per_source), 50)
+                )
+
+        if patch.library is not None:
+            for field in ("auto_download_fonts", "prefer_commercial_safe"):
+                value = getattr(patch.library, field)
+                if value is not None:
+                    setattr(current.library, field, value)
+
+        if patch.refinement is not None:
+            if patch.refinement.enabled is not None:
+                current.refinement.enabled = patch.refinement.enabled
+            # Every extra iteration is a full re-render, so the ceiling is a
+            # guard against an accidental all-night loop, not a preference.
+            if patch.refinement.max_iterations is not None:
+                current.refinement.max_iterations = max(
+                    1, min(int(patch.refinement.max_iterations), 5)
+                )
+            if patch.refinement.target_score is not None:
+                current.refinement.target_score = max(
+                    0.0, min(float(patch.refinement.target_score), 100.0)
+                )
+            if patch.refinement.min_gain is not None:
+                current.refinement.min_gain = max(0.0, min(float(patch.refinement.min_gain), 50.0))
+
         _write(current)
         return current
 

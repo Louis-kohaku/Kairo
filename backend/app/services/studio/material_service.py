@@ -396,6 +396,34 @@ def rebuild_scene(
 # ------------------------------------------------------- filling the gaps
 
 
+
+def _web_identity(candidate) -> str:
+    """A stable identity for a web image: its page, else its file URL."""
+    return (getattr(candidate, "source_page", "") or getattr(candidate, "url", "") or "").strip()
+
+
+def _used_web_sources(db, project_id: str) -> set[str]:
+    """Web images this project has already downloaded.
+
+    Read from `origin_detail`, which `fill_missing_visual` writes as
+    "<attribution> / <source page or url>" - the trailing field is the same
+    identity `_web_identity` produces, so the two match without a new column.
+    """
+    rows = (
+        db.query(MediaAsset)
+        .filter(MediaAsset.project_id == project_id, MediaAsset.origin == "web")
+        .all()
+    )
+    used: set[str] = set()
+    for row in rows:
+        detail = (row.origin_detail or "").strip()
+        if " / " in detail:
+            used.add(detail.rsplit(" / ", 1)[-1].strip())
+        elif detail:
+            used.add(detail)
+    return used
+
+
 def fill_missing_visual(
     db,
     project: Project,
@@ -418,12 +446,24 @@ def fill_missing_visual(
     no explanation.
     """
     if "web" in sources:
+        # Everything this project has already pulled from the web, so a
+        # later scene with similar keywords does not land on the same photo.
+        # Without this the same image filled three scenes of a 13-scene
+        # video and the quality review reported it as repetition.
+        already_used = _used_web_sources(db, project.id)
         try:
-            results = web_material_service.search(keywords, limit=3, orientation=orientation)
+            # Searched wider than needed on purpose: the first few results
+            # are the ones most likely to have been taken already, so a
+            # limit of 3 could return nothing new.
+            results = web_material_service.search(keywords, limit=8, orientation=orientation)
         except Exception:  # noqa: BLE001
             logger.exception("Web material search failed for scene %s", scene.id)
             results = []
         for candidate in results:
+            identity = _web_identity(candidate)
+            if identity and identity in already_used:
+                logger.info("Skipping web material already used in this project: %s", identity)
+                continue
             try:
                 path = web_material_service.download(candidate, project.id)
             except web_material_service.WebMaterialUnavailable as exc:
