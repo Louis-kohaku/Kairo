@@ -39,6 +39,7 @@ from app.models.media_asset import MediaAsset
 from app.models.production import Chapter
 from app.models.project import Project
 from app.models.studio import ProductionRun
+from app.schemas.material import ORIGIN_LABELS
 from app.schemas.studio import ProductionStrategy, ResearchResult
 from app.services import (
     ai_diagnostics,
@@ -53,6 +54,8 @@ from app.services.studio import (
     assembly_service,
     control,
     events,
+    material_analysis,
+    material_plan,
     material_service,
     model_service,
     phases,
@@ -96,6 +99,18 @@ class Pipeline:
         # whether narration is possible.
         self._narration_available: bool | None = None
         self._bgm_asset: MediaAsset | None = None
+        # What the user gave us, and the decision about where it goes. The
+        # plan is restored from the database rather than recomputed, so a
+        # resumed run uses the material the user confirmed instead of
+        # quietly re-deciding behind their back.
+        # Two forms of the same brief. The act-structure prompt asks for
+        # 3-5 acts; telling it "aim for ten scenes" in the same breath made
+        # it emit ten acts, which is ten LLM calls and a video with no
+        # structure. Only the scene writer - the stage that actually
+        # decides how many shots there are - is given the count.
+        self._material_hint: str = ""
+        self._material_brief: str = ""
+        self._material_plan = material_plan.from_json(self.run.material_plan_json)
         self.completed: set[str] = {
             p for p in (self.run.completed_phases or "").split(",") if p
         }
@@ -198,6 +213,77 @@ class Pipeline:
     def _caption_budget(self) -> int:
         return assembly_service.caption_budget(self.project, self.settings)
 
+    def _selected_asset_ids(self) -> list[str]:
+        try:
+            return list(json.loads(self.run.selected_asset_ids or "[]"))
+        except ValueError:
+            return []
+
+    def _material_mode(self) -> str:
+        return self.run.material_mode or "ai_auto"
+
+    def _build_material_hint(self, analyses: list, *, with_scene_count: bool = True) -> str:
+        """The paragraph about the user's material that a writing prompt gets.
+
+        Written as instructions rather than trivia: the writer is told to
+        design shots that can actually be got from this material, which is
+        what stops a script asking for footage nobody has and turning every
+        beat into a shortage.
+
+        `with_scene_count` is off for the act-structure prompt. That prompt
+        asks for three to five acts; telling it "aim for ten scenes" in the
+        same breath made it emit ten acts - ten LLM calls, and a video with
+        no structure. Only the scene writer, the stage that actually decides
+        how many shots there are, is given the count.
+        """
+        if not analyses:
+            return (
+                "【ユーザー素材】\n"
+                "ユーザーは素材をアップロードしていません。映像はKairoが用意するため、"
+                "特定の写真に依存しない構成にしてください。"
+            )
+
+        # Capped: this paragraph is repeated in every chapter's scene
+        # prompt, and a local 7B model on CPU pays for every token of it.
+        # Twelve items is enough for the writer to know what kind of
+        # material it is designing for.
+        lines = []
+        for item in analyses[:12]:
+            kind = {"image": "写真", "video": "動画"}.get(item.kind, item.kind)
+            tags = "・".join(item.tags[:6]) or "内容不明"
+            extra = ""
+            if item.kind == "video" and item.duration:
+                extra = f" / {item.duration:.1f}秒"
+            lines.append(f"- {kind}: {tags}{extra}")
+
+        photos = sum(1 for a in analyses if a.kind == "image")
+        videos = sum(1 for a in analyses if a.kind == "video")
+        count = max(1, photos + videos)
+
+        if not with_scene_count:
+            scene_guidance = ""
+        elif self._material_mode() == "use_all":
+            # "できるだけ全部使う" is a promise about the finished video, and
+            # the only stage that can keep it is the one deciding how many
+            # scenes there are: asking for fewer scenes than the user has
+            # material would leave photos unused however the matching stage
+            # behaved.
+            scene_guidance = (
+                "ユーザーは全ての素材を使うことを希望しています。"
+                f"シーン数は必ず{count}以上にしてください。"
+            )
+        else:
+            scene_guidance = f"シーン数はおおよそ{count}前後を目安にしてください。"
+
+        return (
+            "【ユーザーが用意した素材】\n"
+            f"写真{photos}枚 / 動画{videos}本。内容は次のとおりです。\n"
+            + "\n".join(lines)
+            + "\n\nこの素材で撮れている画を優先してシーンを設計してください。"
+            "visual_prompt は、できるだけ上記の素材で表現できる内容にしてください。"
+            + scene_guidance
+        )
+
     def _target_seconds(self) -> float:
         return max(5.0, float(self.run.target_duration_seconds))
 
@@ -257,6 +343,155 @@ class Pipeline:
             self.event("models", status="info", message=warning)
 
         self._finish_phase("models", f"使用モデル: {self.model_id}")
+
+    def phase_material_analysis(self) -> None:
+        """Works out what is in the photos and videos the user supplied.
+
+        Runs before anything is written, because the script has to be able
+        to ask for shots the user actually has. A project with no material
+        skips this phase and says so: having no material is a supported way
+        to use Kairo, not a missing step.
+        """
+        from app.services import media_service
+
+        assets = media_service.list_user_material(self.db, self.project.id)
+        # "選択した素材だけ使う" has to narrow what the *writer* is told as
+        # well as what the matcher may use; a script written around ten
+        # photos when two were selected is a script of shortages.
+        if self._material_mode() == "selected":
+            wanted = set(self._selected_asset_ids())
+            assets = [a for a in assets if a.id in wanted]
+        if not assets:
+            self._material_hint = self._build_material_hint([])
+            self._material_brief = self._material_hint
+            self._skip_phase(
+                "material_analysis",
+                "ユーザー素材はありません。必要な素材はKairoが用意します。",
+            )
+            return
+
+        vision = material_analysis.vision_available()
+        self.event(
+            "material_analysis",
+            task="アップロードされた素材を解析しています",
+            message="{0}点の素材を解析します".format(len(assets)),
+            reason=(
+                "写っているものを把握し、台本と素材を対応づけるため"
+                if vision
+                else "画像解析AIが無いため、解像度・明るさ・向き・ファイル名から把握します"
+            ),
+            next_task="Webリサーチ",
+        )
+        if not vision:
+            self.event(
+                "material_analysis",
+                status="info",
+                message=(
+                    "画像を解析できるAIモデル（Vision対応）がLM Studioにロードされていません。"
+                    "写っているものの自動認識は行わず、ファイル名と画像の特徴から推定します。"
+                ),
+            )
+
+        analyses = []
+        failed = 0
+        n = len(assets)
+        for i, asset in enumerate(assets):
+            control.checkpoint(self.run_id)
+            self.event(
+                "material_analysis",
+                task="素材 {0}/{1} を解析しています".format(i + 1, n),
+                target=asset.original_filename,
+                message=asset.original_filename,
+                within_phase=i / max(1, n),
+            )
+            try:
+                result = material_analysis.analyze_asset(self.db, asset)
+            except Exception as exc:  # noqa: BLE001 - one bad file is not fatal
+                failed += 1
+                self.event(
+                    "material_analysis",
+                    status="failed",
+                    target=asset.original_filename,
+                    message="「{0}」を解析できませんでした".format(asset.original_filename),
+                    reason=str(exc)[:200],
+                )
+                continue
+            analyses.append(result)
+            self.event(
+                "material_analysis",
+                level="tech",
+                status="info",
+                message="{0}: {1} ({2})".format(
+                    asset.original_filename,
+                    "・".join(result.tags[:6]) or "タグなし",
+                    result.analyzed_by,
+                ),
+            )
+
+        self._material_hint = self._build_material_hint(analyses)
+        self._material_brief = self._build_material_hint(analyses, with_scene_count=False)
+        summary = "{0}点の素材を解析しました".format(len(analyses))
+        if failed:
+            summary += "（{0}点は解析できませんでした）".format(failed)
+        self._finish_phase("material_analysis", summary)
+
+    def phase_material_match(self) -> None:
+        """Decides which material goes into which scene, and what is missing."""
+        self._ensure_scenes()
+        mode = self._material_mode()
+        mode_label = {
+            "ai_auto": "AIにおまかせ",
+            "use_all": "できるだけ全部使う",
+            "selected": "選択した素材だけ使う",
+        }.get(mode, mode)
+        self.event(
+            "material_match",
+            task="どのシーンにどの素材を使うか決めています",
+            message="素材の使い方: " + mode_label,
+            reason="ユーザー素材を最優先し、足りない分だけを補完するため",
+            next_task="素材生成",
+        )
+        plan = material_plan.build_plan(
+            self.db,
+            self.project.id,
+            self.scenes,
+            mode=mode,
+            selected_ids=self._selected_asset_ids(),
+            orientation=self.run.orientation,
+        )
+        material_plan.apply_plan(self.db, plan, self.scenes)
+        self._material_plan = plan
+        self.run.material_plan_json = material_plan.to_json(plan)
+        self.db.commit()
+
+        for assignment in plan.assignments:
+            if assignment.origin != "user":
+                continue
+            self.event(
+                "material_match",
+                status="info",
+                scene_id=self.scenes[assignment.scene_index].id,
+                message="Scene {0}: {1}".format(assignment.scene_number, assignment.filename),
+                reason=assignment.reason,
+            )
+        for shortage in plan.shortages:
+            self.event(
+                "material_match",
+                status="info",
+                scene_id=self.scenes[shortage.scene_index].id,
+                message="Scene {0}: 不足素材「{1}」".format(shortage.scene_number, shortage.need),
+                reason=shortage.fill_reason,
+            )
+        for note in plan.notes:
+            self.event("material_match", status="info", message=note)
+
+        used = plan.used_photo_count + plan.used_video_count
+        self._finish_phase(
+            "material_match",
+            "ユーザー素材{0}点を{1}シーンに割り当て、不足{2}カットを補完します".format(
+                used, len(self.scenes), len(plan.shortages)
+            ),
+        )
 
     def phase_research(self) -> None:
         self.event(
@@ -318,6 +553,7 @@ class Pipeline:
             self._target_seconds(),
             self.research,
             self.run.orientation,
+            material_hint=self._material_brief,
         )
         self.run.strategy_json = json.dumps(self.strategy.model_dump(), ensure_ascii=False)
         self.db.commit()
@@ -337,7 +573,10 @@ class Pipeline:
             next_task="脚本",
         )
         plan, budgets = planning_service.generate_plan(
-            self.run.instruction, self.strategy, self._target_seconds()
+            self.run.instruction,
+            self.strategy,
+            self._target_seconds(),
+            material_hint=self._material_brief,
         )
         self._plan = plan
         self._budgets = budgets
@@ -432,6 +671,7 @@ class Pipeline:
                 is_last_chapter=(i == n - 1),
                 previous_tail=previous_tail,
                 used_visuals=used_visuals,
+                material_hint=self._material_hint,
             )
             chapter_scenes.append((chapter, designs))
             used_visuals.extend(d.visual_prompt for d in designs if d.visual_prompt)
@@ -472,9 +712,31 @@ class Pipeline:
         self._finish_phase("scenes")
 
     def phase_assets(self) -> None:
+        """Puts a real picture behind every scene.
+
+        The order is the material priority order: a scene the matching
+        stage pinned to the user's own photo or footage is left alone (the
+        file itself is used at clip time), and only a scene nothing was
+        left for is filled - from the web, from a diffusion model, or from
+        Kairo's own composition, whichever is actually available. A scene
+        is never given a generated background while the user's material
+        sits unused, because the matching stage has already spent it.
+        """
         self._ensure_scenes()
         engine_id = self.settings.generation.default_engine_id or "procedural"
+        plan = self._material_plan
+        sources = (
+            plan.available_fill_sources
+            if plan is not None
+            else material_plan.available_fill_sources()
+        )
+        shortage_by_index = (
+            {s.scene_index: s for s in plan.shortages} if plan is not None else {}
+        )
         n = len(self.scenes)
+        from_user = 0
+        filled: dict[str, int] = {}
+
         for i, scene in enumerate(self.scenes):
             control.checkpoint(self.run_id)
             nxt = f"Scene {i + 2}" if i + 1 < n else "音声"
@@ -488,21 +750,65 @@ class Pipeline:
                 scene_id=scene.id,
                 within_phase=i / max(1, n),
             )
-            user_source = material_service.resolve_user_source(self.db, scene, self.project.id)
-            if user_source is not None:
+            pinned = material_service.resolve_pinned_source(self.db, scene, self.project.id)
+            if pinned is not None:
+                from_user += 1
+                if not scene.material_origin:
+                    scene.material_origin = "user" if scene.asset_source == "user" else "web"
+                    self.db.commit()
+                label = "写真" if pinned.kind == "image" else "動画"
                 self.event(
                     "assets",
                     status="info",
                     scene_id=scene.id,
-                    message="ユーザーが指定した素材を使用します",
+                    message=f"ユーザー素材（{label}）「{pinned.filename}」を使用します",
+                    reason=scene.material_note or "",
                 )
                 continue
-            material_service.render_scene_visual(
-                scene, i, self.project, self.strategy, engine_id=engine_id
+
+            shortage = shortage_by_index.get(i)
+            keywords = (
+                shortage.keywords
+                if shortage is not None
+                else material_plan.shortage_keywords(scene)
+            )
+            if plan is not None:
+                origin, note = material_service.fill_missing_visual(
+                    self.db,
+                    self.project,
+                    scene,
+                    i,
+                    self.strategy,
+                    keywords=keywords,
+                    sources=sources,
+                    orientation=self.run.orientation,
+                )
+            else:
+                # No plan (a resumed run from before this existed): keep the
+                # original behaviour rather than inventing a new one.
+                material_service.render_scene_visual(
+                    scene, i, self.project, self.strategy, engine_id=engine_id
+                )
+                scene.material_origin = "procedural"
+                origin, note = "procedural", ""
+            filled[origin] = filled.get(origin, 0) + 1
+            self.event(
+                "assets",
+                status="info",
+                scene_id=scene.id,
+                message=f"不足していた素材を補完しました（{ORIGIN_LABELS.get(origin, origin)}）",
+                reason=note,
             )
             scene.status = "generated"
             self.db.commit()
-        self._finish_phase("assets", f"{n}シーン分の映像素材を用意しました")
+
+        detail = "・".join(
+            f"{ORIGIN_LABELS.get(k, k)}{v}" for k, v in filled.items()
+        )
+        summary = f"{n}シーン分の映像素材を用意しました（ユーザー素材{from_user}）"
+        if detail:
+            summary += f" / 補完: {detail}"
+        self._finish_phase("assets", summary)
 
     def phase_narration(self) -> None:
         self._ensure_scenes()
@@ -600,6 +906,7 @@ class Pipeline:
 
         self.db.commit()
         duration = assembly_service.assemble(self.db, self.project, self.scenes, self.bgm_asset)
+        self._sync_plan_times()
         self._finish_phase("assembly", f"タイムラインに{n}シーン（{duration:.0f}秒）を並べました")
 
     def phase_quality_check(self) -> None:
@@ -780,6 +1087,29 @@ class Pipeline:
 
     # ------------------------------------------------------------ support
 
+    def _sync_plan_times(self) -> None:
+        """Re-times the stored material plan against the assembled cut.
+
+        The plan is made before narration is synthesised, and measured
+        speech lengthens scenes. Leaving the plan on its original numbers
+        would make the 素材プラン and the 使用素材 list disagree about when
+        the same shot appears, and the one on screen would be the wrong
+        one.
+        """
+        plan = self._material_plan
+        if plan is None:
+            return
+        cursor = 0.0
+        for i, scene in enumerate(self.scenes):
+            duration = float(scene.estimated_duration or 0.0)
+            for assignment in plan.assignments:
+                if assignment.scene_index == i:
+                    assignment.start_time = round(cursor, 2)
+                    assignment.duration = round(duration, 2)
+            cursor += duration
+        self.run.material_plan_json = material_plan.to_json(plan)
+        self.db.commit()
+
     def _ensure_scenes(self) -> None:
         """Loads the project's scenes if this process didn't create them.
 
@@ -818,12 +1148,14 @@ class Pipeline:
     _ORDER = (
         ("environment", "phase_environment"),
         ("models", "phase_models"),
+        ("material_analysis", "phase_material_analysis"),
         ("research", "phase_research"),
         ("trends", "phase_trends"),
         ("strategy", "phase_strategy"),
         ("planning", "phase_planning"),
         ("script", "phase_script"),
         ("scenes", "phase_scenes"),
+        ("material_match", "phase_material_match"),
         ("assets", "phase_assets"),
         ("narration", "phase_narration"),
         ("audio", "phase_audio"),

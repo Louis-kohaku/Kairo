@@ -223,6 +223,44 @@ def diagnose(
     text = f"{type(exc).__name__}: {exc}".lower()
     exc_name = type(exc).__name__
 
+    # Material import failures already carry a user-facing headline, cause
+    # and remedy - they were built that way so the material area could
+    # explain itself. Re-deriving any of that from the exception text here
+    # would throw away better information than this module can produce.
+    if exc_name == "UnsupportedMediaError" and hasattr(exc, "message"):
+        return _finish(
+            Diagnosis(
+                summary=getattr(exc, "message", str(exc)),
+                category="input_material",
+                cause_known=bool(getattr(exc, "cause", "")),
+                cause=getattr(exc, "cause", "") or "原因を特定できませんでした。",
+                facts=[getattr(exc, "hint", "")] if getattr(exc, "hint", "") else [],
+                suggestions=[Suggestion("別の素材で再試行", "retry")],
+            ),
+            exc,
+            context,
+            step,
+        )
+
+    if "素材ファイルが見つかりません" in str(exc) or "no such file" in text and "assets" in text:
+        return _finish(
+            Diagnosis(
+                summary="素材ファイルを読み込めませんでした。",
+                category="input_material",
+                cause_known=True,
+                cause=(
+                    "使用しようとした素材ファイルが見つかりませんでした。"
+                    "素材が削除されたか、プロジェクトフォルダから移動された可能性があります。"
+                ),
+                suggestions=[
+                    Suggestion("素材を読み込み直す", "retry"),
+                ],
+            ),
+            exc,
+            context,
+            step,
+        )
+
     if isinstance(exc, llm_client.LLMNotReadyError):
         return _finish(diagnose_llm_status(exc.status, context=context), exc, context, step)
 

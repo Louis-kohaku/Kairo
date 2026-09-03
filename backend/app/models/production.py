@@ -102,6 +102,18 @@ class Scene(Base):
     # `media_asset_id` (the rendered clip) so re-rendering the scene never
     # loses the source it was rendered from.
     user_asset_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # The slice of the pinned footage this scene uses. A 40-second clip
+    # dropped into a 3-second beat has to start *somewhere*, and the
+    # material analysis has an opinion about where the usable part is;
+    # without these the clip would always be taken from 0:00.
+    user_asset_start: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    user_asset_end: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Where this scene's visual came from, for the "使用素材" report:
+    # user | web | ai_generated | procedural. Set by the asset stage, so a
+    # finished video can always say which of its shots were the user's own.
+    material_origin: Mapped[str] = mapped_column(String, default="")
+    # One line explaining the choice ("海のタグが一致", "不足のためAI生成").
+    material_note: Mapped[str] = mapped_column(Text, default="")
     media_asset_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     narration_asset_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     narration_duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

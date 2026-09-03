@@ -73,8 +73,53 @@ _NEW_COLUMNS = {
         ("narration_duration", "REAL"),
         ("start_time", "REAL"),
         ("is_hook", "INTEGER"),
+        # Material pipeline: which slice of a pinned clip this scene uses,
+        # and where its visual came from.
+        ("user_asset_start", "REAL"),
+        ("user_asset_end", "REAL"),
+        ("material_origin", "TEXT"),
+        ("material_note", "TEXT"),
+    ],
+    # Material provenance and the cached analysis result. Existing rows
+    # get NULLs, which every reader treats as "user material, not yet
+    # analysed" - the same state a fresh import starts in.
+    "media_assets": [
+        ("origin", "TEXT"),
+        ("origin_detail", "TEXT"),
+        ("analysis_status", "TEXT"),
+        ("analysis_json", "TEXT"),
+        ("analysis_error", "TEXT"),
+    ],
+    "production_runs": [
+        ("material_mode", "TEXT"),
+        ("selected_asset_ids", "TEXT"),
+        ("material_plan_json", "TEXT"),
     ],
 }
+
+
+# Rows that existed before `origin` did have NULL there, and NULL cannot be
+# read as "the user uploaded this": a project produced by an earlier version
+# is full of scene clips and generated BGM, and treating those as the user's
+# own material would put Kairo's own output back into the material list and
+# into the matching pool. The file names those two producers have always
+# used are the only evidence available after the fact, and they are
+# unambiguous, so they are what the backfill keys on.
+_BACKFILL = (
+    """
+    UPDATE media_assets SET origin = CASE
+        WHEN original_filename LIKE 'AI生成BGM%' THEN 'kairo_bgm'
+        WHEN original_filename LIKE 'Scene%' AND kind = 'video' THEN 'kairo_clip'
+        ELSE 'user'
+    END
+    WHERE origin IS NULL
+    """,
+    "UPDATE media_assets SET analysis_status = 'pending' WHERE analysis_status IS NULL",
+    "UPDATE media_assets SET origin_detail = '' WHERE origin_detail IS NULL",
+    "UPDATE production_runs SET material_mode = 'ai_auto' WHERE material_mode IS NULL",
+    "UPDATE scenes SET material_origin = '' WHERE material_origin IS NULL",
+    "UPDATE scenes SET material_note = '' WHERE material_note IS NULL",
+)
 
 
 def _ensure_columns() -> None:
@@ -84,3 +129,5 @@ def _ensure_columns() -> None:
             for name, sql_type in columns:
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
+        for statement in _BACKFILL:
+            conn.execute(text(statement))

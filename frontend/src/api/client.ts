@@ -17,6 +17,11 @@ import type {
   Generation,
   Job,
   LLMStatus,
+  Material,
+  MaterialMode,
+  MaterialPlan,
+  MaterialUploadError,
+  MaterialUsageReport,
   MediaAsset,
   ModelsListOut,
   Project,
@@ -44,8 +49,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(detail.detail ?? `Request failed: ${res.status}`);
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    const detail = body.detail ?? `Request failed: ${res.status}`;
+    // A structured detail (the material upload returns one per failed
+    // file) is serialised rather than coerced: `new Error(object)` becomes
+    // "[object Object]", which throws away exactly the explanation the
+    // endpoint went to the trouble of producing.
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return res.json() as Promise<T>;
 }
@@ -319,6 +329,8 @@ export const api = {
       targetDurationSeconds: number;
       orientation: string;
       mode?: "full_auto" | "co_creation";
+      materialMode?: MaterialMode;
+      selectedAssetIds?: string[];
     },
   ) =>
     request<ProductionRun>(`/api/projects/${projectId}/studio/start`, {
@@ -328,6 +340,8 @@ export const api = {
         target_duration_seconds: opts.targetDurationSeconds,
         orientation: opts.orientation,
         mode: opts.mode ?? "full_auto",
+        material_mode: opts.materialMode ?? "ai_auto",
+        selected_asset_ids: opts.selectedAssetIds ?? [],
       }),
     }),
 
@@ -406,6 +420,73 @@ export const api = {
     request<{ result: { restored_scenes: number[] }; proposal: ChangeProposal }>(
       `/api/proposals/${proposalId}/undo`,
       { method: "POST" },
+    ),
+
+
+  // ---- Material (the user's own photos and videos) ----
+
+  listMaterials: (projectId: string) =>
+    request<{
+      materials: Material[];
+      vision_available: boolean;
+      modes: { id: MaterialMode; label: string }[];
+    }>(`/api/projects/${projectId}/materials`),
+
+  uploadMaterials: (projectId: string, files: File[]) => {
+    const form = new FormData();
+    for (const file of files) form.append("files", file);
+    return request<{ imported: Material[]; errors: MaterialUploadError[] }>(
+      `/api/projects/${projectId}/materials`,
+      { method: "POST", body: form },
+    );
+  },
+
+  deleteMaterial: (assetId: string) =>
+    request<{ ok: boolean }>(`/api/materials/${assetId}`, { method: "DELETE" }),
+
+  materialThumbnailUrl: (assetId: string) =>
+    `${API_BASE}/api/materials/${assetId}/thumbnail`,
+
+  analyzeMaterials: (projectId: string, force = false) =>
+    request<{
+      materials: Material[];
+      vision_available: boolean;
+      failed: { id: string; filename: string; error: string | null }[];
+    }>(`/api/projects/${projectId}/materials/analyze?force=${force}`, { method: "POST" }),
+
+  getMaterialPlan: (
+    projectId: string,
+    opts: { mode?: MaterialMode; targetSeconds?: number; selected?: string[] } = {},
+  ) => {
+    const params = new URLSearchParams({
+      mode: opts.mode ?? "ai_auto",
+      target_seconds: String(opts.targetSeconds ?? 30),
+      selected: (opts.selected ?? []).join(","),
+    });
+    return request<{ plan: MaterialPlan }>(
+      `/api/projects/${projectId}/materials/plan?${params.toString()}`,
+    ).then((r) => r.plan);
+  },
+
+  getMaterialUsage: (projectId: string) =>
+    request<{ usage: MaterialUsageReport }>(
+      `/api/projects/${projectId}/materials/usage`,
+    ).then((r) => r.usage),
+
+  reevaluateMaterials: (
+    projectId: string,
+    opts: { mode?: MaterialMode; selectedAssetIds?: string[]; rerender?: boolean } = {},
+  ) =>
+    request<{ job_id: string; status: string }>(
+      `/api/projects/${projectId}/materials/reevaluate`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          mode: opts.mode ?? "ai_auto",
+          selected_asset_ids: opts.selectedAssetIds ?? [],
+          rerender: opts.rerender ?? true,
+        }),
+      },
     ),
 
   ttsPreview: async (text: string, voiceId: string | null) => {

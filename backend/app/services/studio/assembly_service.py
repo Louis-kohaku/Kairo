@@ -171,6 +171,8 @@ def build_bgm(db, project: Project, duration: float, mood: str) -> MediaAsset | 
         duration=info.duration,
         has_audio=True,
         audio_codec=info.audio_codec,
+        origin="kairo_bgm",
+        analysis_status="skipped",
     )
     db.add(asset)
     db.commit()

@@ -53,6 +53,8 @@ def create_run(
     target_duration_seconds: float,
     orientation: str = "vertical",
     mode: str = "full_auto",
+    material_mode: str = "ai_auto",
+    selected_asset_ids: list[str] | None = None,
 ) -> ProductionRun:
     existing = active_run(db, project_id)
     if existing is not None:
@@ -66,6 +68,8 @@ def create_run(
         instruction=instruction.strip(),
         target_duration_seconds=max(5.0, target_duration_seconds),
         orientation=orientation,
+        material_mode=material_mode,
+        selected_asset_ids=json.dumps(selected_asset_ids or [], ensure_ascii=False),
     )
     db.add(run)
     db.commit()
@@ -160,6 +164,9 @@ def to_dict(db, run: ProductionRun | None) -> dict | None:
         "instruction": run.instruction,
         "target_duration_seconds": run.target_duration_seconds,
         "orientation": run.orientation,
+        "material_mode": run.material_mode or "ai_auto",
+        "selected_asset_ids": load_json(run.selected_asset_ids) or [],
+        "material_plan": load_json(run.material_plan_json),
         "completed_phases": completed,
         "resume_phase": run.resume_phase,
         "render_job_id": run.render_job_id,

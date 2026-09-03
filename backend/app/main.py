@@ -9,6 +9,7 @@ from app.api import (
     cut,
     generation,
     jobs,
+    materials,
     media,
     production,
     projects,
@@ -39,6 +40,7 @@ app.add_middleware(
 
 app.include_router(projects.router)
 app.include_router(media.router)
+app.include_router(materials.router)
 app.include_router(timeline.router)
 app.include_router(jobs.router)
 app.include_router(subtitles.router)

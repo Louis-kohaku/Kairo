@@ -62,7 +62,11 @@ def _ask_json(messages: list[dict], what: str, temperature: float = 0.4) -> dict
 
 
 def _strategy_prompt(
-    instruction: str, duration_seconds: float, research: ResearchResult, orientation: str
+    instruction: str,
+    duration_seconds: float,
+    research: ResearchResult,
+    orientation: str,
+    material_hint: str = "",
 ) -> list[dict]:
     trends = research.trends
     orientation_label = {
@@ -98,6 +102,7 @@ def _strategy_prompt(
         f"想定尺: 約{duration_seconds:.0f}秒\n"
         f"フォーマット: {orientation_label}\n\n"
         f"{research_block}"
+        + ("\n\n" + material_hint if material_hint else "")
     )
     return [
         {"role": "system", "content": system},
@@ -110,9 +115,20 @@ def generate_strategy(
     duration_seconds: float,
     research: ResearchResult,
     orientation: str = "vertical",
+    material_hint: str = "",
 ) -> ProductionStrategy:
+    """`material_hint` describes what the user actually uploaded.
+
+    Threaded into the strategy - and, below, the plan and the script - so
+    the video is designed *around* the material that exists rather than
+    designed first and then forced onto whatever photos happen to be
+    there. A brief written for footage the user does not have is the main
+    way a production ends up replacing their material with generated
+    images.
+    """
     data = _ask_json(
-        _strategy_prompt(instruction, duration_seconds, research, orientation), "制作戦略"
+        _strategy_prompt(instruction, duration_seconds, research, orientation, material_hint),
+        "制作戦略",
     )
     try:
         strategy = ProductionStrategy.model_validate(data)
@@ -135,7 +151,10 @@ def generate_strategy(
 
 
 def _plan_prompt(
-    instruction: str, strategy: ProductionStrategy, duration_seconds: float
+    instruction: str,
+    strategy: ProductionStrategy,
+    duration_seconds: float,
+    material_hint: str = "",
 ) -> list[dict]:
     system = (
         "あなたはショート動画の構成作家です。制作戦略に沿って、動画全体の企画と"
@@ -156,6 +175,7 @@ def _plan_prompt(
         f"Hook: {strategy.hook}\n"
         f"感情の流れ: {' → '.join(strategy.emotional_arc) or '未指定'}\n"
         f"終わり方: {strategy.ending}"
+        + ("\n\n" + material_hint if material_hint else "")
     )
     return [
         {"role": "system", "content": system},
@@ -164,14 +184,19 @@ def _plan_prompt(
 
 
 def generate_plan(
-    instruction: str, strategy: ProductionStrategy, duration_seconds: float
+    instruction: str,
+    strategy: ProductionStrategy,
+    duration_seconds: float,
+    material_hint: str = "",
 ) -> tuple[PlanOutline, list[float]]:
     """Returns the plan plus a per-chapter second budget.
 
     The budget is normalised here rather than trusted: chapter seconds that
     sum to 38 for a 60-second brief would silently produce a short video.
     """
-    data = _ask_json(_plan_prompt(instruction, strategy, duration_seconds), "企画")
+    data = _ask_json(
+        _plan_prompt(instruction, strategy, duration_seconds, material_hint), "企画"
+    )
     try:
         plan = PlanOutline.model_validate(data)
     except ValidationError as exc:
@@ -215,6 +240,7 @@ def _scene_prompt(
     is_last_chapter: bool,
     previous_tail: str,
     used_visuals: list[str],
+    material_hint: str = "",
 ) -> list[dict]:
     role_note = ""
     if is_first_chapter:
@@ -271,6 +297,10 @@ def _scene_prompt(
             if used_visuals
             else ""
         )
+        # The material the user supplied. Without it the writer invents
+        # shots nobody has, and every beat becomes a shortage that has to
+        # be filled with something Kairo made up.
+        + ("\n\n" + material_hint if material_hint else "")
     )
     return [
         {"role": "system", "content": system},
@@ -289,6 +319,7 @@ def generate_scenes(
     is_last_chapter: bool = False,
     previous_tail: str = "",
     used_visuals: list[str] | None = None,
+    material_hint: str = "",
 ) -> list[ShortFormScene]:
     data = _ask_json(
         _scene_prompt(
@@ -301,6 +332,7 @@ def generate_scenes(
             is_last_chapter,
             previous_tail,
             used_visuals or [],
+            material_hint,
         ),
         "シーン設計",
     )

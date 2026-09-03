@@ -241,6 +241,110 @@ class LLMNotReadyError(RuntimeError):
         super().__init__(status.error_code)
 
 
+# Substrings identifying models that accept images alongside text. LM
+# Studio exposes no capability flag on /v1/models, so the model id is the
+# only signal available - and guessing wrong in the permissive direction is
+# what produces a confusing 400 halfway through an analysis. The list is
+# therefore deliberately conservative: an unlisted vision model is reported
+# as "no vision model loaded", which degrades to metadata analysis rather
+# than failing.
+_VISION_MODEL_MARKERS = (
+    "vl",           # qwen2-vl, qwen2.5-vl, internvl
+    "vision",
+    "llava",
+    "bakllava",
+    "moondream",
+    "minicpm-v",
+    "pixtral",
+    "gemma-3",      # Gemma 3 is multimodal from 4B up
+    "phi-3.5-vision",
+    "phi-4-multimodal",
+    "idefics",
+    "cogvlm",
+)
+
+
+def is_vision_model(model_id: str) -> bool:
+    low = (model_id or "").lower()
+    return any(marker in low for marker in _VISION_MODEL_MARKERS)
+
+
+def vision_model() -> str | None:
+    """The loaded model that can look at an image, if there is one.
+
+    Prefers the model already resolved for text work when it happens to be
+    multimodal, so a single loaded VLM serves both jobs without a reload.
+    """
+    status = get_status()
+    if status.configured_model and is_vision_model(status.configured_model):
+        return status.configured_model
+    for model_id in status.models_loaded:
+        if is_vision_model(model_id):
+            return model_id
+    return None
+
+
+def vision_completion(
+    prompt: str,
+    images: list[tuple[str, bytes]],
+    *,
+    model_id: str | None = None,
+    temperature: float = 0.1,
+    system: str = "",
+) -> str:
+    """Asks a loaded vision model what is in one or more images.
+
+    `images` are (mime_type, raw_bytes) pairs, sent as data URLs in the
+    OpenAI-compatible `image_url` content parts LM Studio accepts. Raises
+    LLMUnavailableError when no vision model is loaded - the caller is
+    expected to fall back to metadata analysis and *say* that it did,
+    rather than presenting a guess as an AI result.
+    """
+    import base64
+
+    resolved = model_id or vision_model()
+    if not resolved:
+        raise LLMUnavailableError(
+            "画像を解析できるAIモデル（Vision対応モデル）がLM Studioにロードされていません。"
+        )
+
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for mime, blob in images:
+        encoded = base64.b64encode(blob).decode("ascii")
+        content.append(
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
+        )
+
+    messages: list[dict] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": content})
+
+    url = f"{LLM_BASE_URL.rstrip('/')}/chat/completions"
+    payload = {"model": resolved, "messages": messages, "temperature": temperature}
+    try:
+        resp = requests.post(url, json=payload, timeout=LLM_TIMEOUT)
+    except requests.Timeout as exc:
+        raise LLMTimeoutError(
+            f"画像解析モデル「{resolved}」からの応答が{LLM_TIMEOUT:.0f}秒以内に返りませんでした。"
+        ) from exc
+    except requests.RequestException as exc:
+        raise LLMUnavailableError(
+            f"LM Studioに接続できません ({LLM_BASE_URL})。"
+        ) from exc
+
+    if not resp.ok:
+        raise LLMResponseError(
+            f"画像解析でLM Studioがエラーを返しました ({resp.status_code}): {resp.text[:300]}"
+        )
+    try:
+        return resp.json()["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError) as exc:
+        raise LLMResponseError(
+            f"画像解析の応答を解釈できませんでした: {resp.text[:300]}"
+        ) from exc
+
+
 def chat_completion(messages: list[dict], temperature: float = 0.2) -> str:
     # Resolved fresh on every call (not a module-level constant) so a model
     # switched in LM Studio, or an AI setting changed in Kairo's UI, takes

@@ -11,7 +11,9 @@ export interface Project {
 export interface MediaAsset {
   id: string;
   project_id: string;
-  kind: "video" | "audio";
+  // "image" joined video/audio when the studio started accepting the
+  // user's own photos as scene material.
+  kind: "video" | "image" | "audio";
   original_filename: string;
   duration: number;
   width: number | null;
@@ -20,6 +22,10 @@ export interface MediaAsset {
   has_audio: boolean;
   video_codec: string | null;
   audio_codec: string | null;
+  // Where this file came from: user | web | ai_generated | kairo_clip |
+  // kairo_bgm. Absent on rows imported before the material pipeline.
+  origin?: string;
+  origin_detail?: string;
   imported_at: string;
 }
 
@@ -114,6 +120,11 @@ export interface Scene {
   asset_source: string;
   // The user's pinned footage; media_asset_id is the rendered clip.
   user_asset_id: string | null;
+  user_asset_start: number | null;
+  user_asset_end: number | null;
+  // Where this scene's picture came from, for the 使用素材 report.
+  material_origin: string;
+  material_note: string;
   media_asset_id: string | null;
   narration_duration: number | null;
   start_time: number;
@@ -624,6 +635,9 @@ export interface ProductionRun {
   instruction: string;
   target_duration_seconds: number;
   orientation: string;
+  material_mode: MaterialMode;
+  selected_asset_ids: string[];
+  material_plan: MaterialPlan | null;
   completed_phases: string[];
   resume_phase: string | null;
   render_job_id: string | null;
@@ -638,6 +652,152 @@ export interface ProductionRun {
   scene_count: number;
   created_at: string | null;
   updated_at: string | null;
+}
+
+
+// ---------------------------------------------------------------- material
+//
+// The user's own photos and videos, what Kairo worked out about them, and
+// where they end up in the finished video. Mirrors backend/app/schemas/
+// material.py field for field - the two are one contract, not two.
+
+export type MaterialOrigin = "user" | "local" | "web" | "ai_generated" | "procedural";
+
+export const MATERIAL_ORIGIN_LABELS: Record<MaterialOrigin, string> = {
+  user: "ユーザー素材",
+  local: "ローカル素材",
+  web: "Web素材",
+  ai_generated: "AI生成",
+  procedural: "抽象背景",
+};
+
+export type MaterialMode = "ai_auto" | "use_all" | "selected";
+
+export interface UsableRange {
+  start: number;
+  end: number;
+  reason: string;
+}
+
+export interface MaterialAnalysis {
+  asset_id: string;
+  kind: string;
+  tags: string[];
+  description: string;
+  scene_summary: string;
+  width: number | null;
+  height: number | null;
+  orientation: string;
+  duration: number;
+  fps: number | null;
+  has_audio: boolean;
+  brightness: number | null;
+  motion: number | null;
+  dominant_colors: string[];
+  usable: UsableRange;
+  // "vision_ai" | "metadata" | "metadata+filename" - shown verbatim so the
+  // user is never told an AI looked at a photo when none did.
+  analyzed_by: string;
+  notes: string;
+}
+
+export interface PlannedUse {
+  scene_number: number;
+  start_time: number;
+  duration: number;
+  reason: string;
+}
+
+export interface Material {
+  id: string;
+  project_id: string;
+  kind: "video" | "image" | "audio";
+  original_filename: string;
+  duration: number;
+  width: number | null;
+  height: number | null;
+  fps: number | null;
+  has_audio: boolean;
+  video_codec: string | null;
+  audio_codec: string | null;
+  origin: string;
+  origin_detail: string;
+  analysis_status: "pending" | "done" | "failed" | "skipped";
+  analysis_error: string | null;
+  analysis: MaterialAnalysis | null;
+  planned_use: PlannedUse | null;
+  imported_at: string | null;
+}
+
+export interface MaterialUploadError {
+  filename: string;
+  message: string;
+  cause: string;
+  hint: string;
+  raw: string;
+}
+
+export interface MaterialAssignment {
+  scene_index: number;
+  scene_number: number;
+  subtitle: string;
+  visual_prompt: string;
+  duration: number;
+  start_time: number;
+  origin: MaterialOrigin;
+  asset_id: string | null;
+  filename: string;
+  source_start: number | null;
+  source_end: number | null;
+  reason: string;
+  matched_tags: string[];
+  score: number;
+}
+
+export interface MaterialShortage {
+  scene_index: number;
+  scene_number: number;
+  need: string;
+  keywords: string[];
+  fill_method: MaterialOrigin;
+  fill_reason: string;
+}
+
+export interface MaterialPlan {
+  mode: MaterialMode;
+  user_photo_count: number;
+  user_video_count: number;
+  used_photo_count: number;
+  used_video_count: number;
+  unused_asset_ids: string[];
+  assignments: MaterialAssignment[];
+  shortages: MaterialShortage[];
+  fill_counts: Record<string, number>;
+  available_fill_sources: string[];
+  notes: string[];
+  provisional: boolean;
+  estimated_scene_count: number;
+}
+
+export interface MaterialUsageEntry {
+  scene_index: number;
+  scene_number: number;
+  start: number;
+  end: number;
+  origin: MaterialOrigin;
+  origin_label: string;
+  asset_id: string | null;
+  filename: string;
+  subtitle: string;
+  note: string;
+  source_start: number | null;
+  source_end: number | null;
+}
+
+export interface MaterialUsageReport {
+  entries: MaterialUsageEntry[];
+  total_duration: number;
+  counts: Record<string, number>;
 }
 
 export interface ChangePreview {

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type {
+  MaterialMode,
+  MaterialUsageEntry,
   MediaAsset,
   ProductionData,
   Project,
@@ -8,6 +10,8 @@ import type {
   Timeline as TimelineData,
 } from "../types";
 import { useProductionRun } from "../hooks/useProductionRun";
+import { useMaterials } from "../hooks/useMaterials";
+import { useMaterialUsage } from "../hooks/useMaterialUsage";
 import ProductionProgress from "../components/studio/ProductionProgress";
 import AIActivity from "../components/studio/AIActivity";
 import ProductionLog from "../components/studio/ProductionLog";
@@ -17,6 +21,9 @@ import CoCreationChat from "../components/studio/CoCreationChat";
 import QualityPanel from "../components/studio/QualityPanel";
 import ResearchPanel from "../components/studio/ResearchPanel";
 import SceneBoard from "../components/studio/SceneBoard";
+import MaterialPanel from "../components/studio/MaterialPanel";
+import MaterialPlanPanel from "../components/studio/MaterialPlanPanel";
+import MaterialUsagePanel from "../components/studio/MaterialUsagePanel";
 import StudioCompletion from "../components/studio/StudioCompletion";
 import PreviewPlayer from "../components/PreviewPlayer";
 import Timeline from "../components/Timeline";
@@ -25,11 +32,20 @@ import LlmStatusBadge from "../components/LlmStatusBadge";
 import SystemInfoPanel from "../components/SystemInfoPanel";
 import { formatTime } from "../utils/format";
 
-type Tab = "progress" | "preview" | "scenes" | "quality" | "research";
+type Tab =
+  | "progress"
+  | "preview"
+  | "materials"
+  | "usage"
+  | "scenes"
+  | "quality"
+  | "research";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "progress", label: "制作状況" },
   { id: "preview", label: "プレビュー" },
+  { id: "materials", label: "素材" },
+  { id: "usage", label: "使用素材" },
   { id: "scenes", label: "シーン" },
   { id: "quality", label: "品質" },
   { id: "research", label: "調査・戦略" },
@@ -72,8 +88,15 @@ export default function Studio({
   const [seekNonce, setSeekNonce] = useState(0);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [recheckBusy, setRecheckBusy] = useState(false);
+  const [reevalBusy, setReevalBusy] = useState(false);
+  const [reevalNotice, setReevalNotice] = useState<string | null>(null);
+  const [usageKey, setUsageKey] = useState(0);
   // Section 37: available on demand, never cluttering the production view.
   const [showSystem, setShowSystem] = useState(false);
+
+  const material = useMaterials(projectId, run?.target_duration_seconds ?? 30);
+
+  const usage = useMaterialUsage(projectId, usageKey);
 
   const refreshProject = useCallback(async () => {
     try {
@@ -105,6 +128,11 @@ export default function Studio({
   const statusKey = run?.status ?? "";
   useEffect(() => {
     refreshProject();
+    material.reload();
+    setUsageKey((k) => k + 1);
+    // `material.reload` is stable per project; depending on it here would
+    // re-run this effect on every render of the hook's internal state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phaseKey, statusKey, refreshProject]);
 
   const assetsById = useMemo(() => {
@@ -128,6 +156,8 @@ export default function Studio({
     targetDurationSeconds: number;
     orientation: string;
     mode: "full_auto" | "co_creation";
+    materialMode: MaterialMode;
+    selectedAssetIds: string[];
   }) => {
     setStarting(true);
     try {
@@ -137,6 +167,30 @@ export default function Studio({
       // surfaced through `error`
     } finally {
       setStarting(false);
+    }
+  };
+
+  /**
+   * Design requirement 12: material added after production started is not a
+   * new project. The backend re-matches over the existing scenes, rebuilds
+   * only what changed and re-renders, so "海の写真をあと3枚" improves the
+   * video that already exists instead of starting again.
+   */
+  const handleReevaluate = async () => {
+    setReevalBusy(true);
+    setReevalNotice(null);
+    try {
+      await api.reevaluateMaterials(projectId, {
+        mode: material.mode,
+        selectedAssetIds: material.selectedIds,
+      });
+      setReevalNotice(
+        "追加素材の反映を開始しました。進行状況は「制作状況」に表示されます。",
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setReevalBusy(false);
     }
   };
 
@@ -172,6 +226,7 @@ export default function Studio({
         />
         {showSystem && <SystemModal onClose={() => setShowSystem(false)} />}
         <StudioLauncher
+          projectId={projectId}
           mode={mode}
           onStart={handleStart}
           busy={starting}
@@ -282,6 +337,7 @@ export default function Studio({
                   onOpenEditor={onOpenEditor}
                   onPreview={() => setTab("preview")}
                   onImproveMore={() => setChatOpen(true)}
+                  onShowMaterials={() => setTab("usage")}
                 />
               )}
               <ProductionLog events={events} />
@@ -331,13 +387,84 @@ export default function Studio({
                       setPlayhead(t);
                       setSeekNonce((n) => n + 1);
                     }}
-                    onSelectClip={setSelectedClipId}
+                    onSelectClip={(id) => {
+                      setSelectedClipId(id);
+                      // Selecting a clip is the natural way to ask "この素材は
+                      // どこから来たのか", so it moves the playhead onto that
+                      // clip and the source bar below answers.
+                      const clips = videoTrack?.clips ?? [];
+                      const index = clips.findIndex((c) => c.id === id);
+                      if (index >= 0) {
+                        const start = clips
+                          .slice(0, index)
+                          .reduce((n, c) => n + (c.out_point - c.in_point), 0);
+                        setPlayhead(start);
+                        setSeekNonce((n) => n + 1);
+                      }
+                    }}
                     onDropAsset={() => {}}
                     onDeleteClip={() => {}}
                     subtitleCues={cues}
                   />
+                  <MaterialSourceBar
+                    entry={usage.entryAt(playhead)}
+                    onOpenUsage={() => setTab("usage")}
+                  />
                 </>
               )}
+            </div>
+          )}
+
+          {tab === "materials" && (
+            <div className="studio-panel">
+              <MaterialPlanPanel plan={run.material_plan ?? material.plan} />
+              {reevalNotice && <div className="material-notice">{reevalNotice}</div>}
+              <div className="material-reeval">
+                <button
+                  className="primary"
+                  onClick={handleReevaluate}
+                  disabled={reevalBusy || isRunning || material.materials.length === 0}
+                  title={
+                    isRunning
+                      ? "制作の実行中は素材を反映できません。完了を待つか一時停止してください。"
+                      : undefined
+                  }
+                >
+                  {reevalBusy ? "反映しています…" : "追加素材を反映して作り直す"}
+                </button>
+                <span className="material-plan-dim">
+                  追加した素材でタイムラインを再評価し、より合う素材に置き換えてMP4を作り直します。
+                </span>
+              </div>
+              <MaterialPanel
+                projectId={projectId}
+                materials={material.materials}
+                loading={material.loading}
+                visionAvailable={material.visionAvailable}
+                mode={material.mode}
+                selectedIds={material.selectedIds}
+                onModeChange={material.setMode}
+                onSelectionChange={material.setSelectedIds}
+                onChanged={material.reload}
+                busy={reevalBusy}
+              />
+            </div>
+          )}
+
+          {tab === "usage" && (
+            <div className="studio-panel">
+              <MaterialUsagePanel
+                materials={material.materials}
+                usage={usage.usage}
+                loading={usage.loading}
+                error={usage.error}
+                playhead={playhead}
+                onSeek={(t) => {
+                  setPlayhead(t);
+                  setSeekNonce((n) => n + 1);
+                  setTab("preview");
+                }}
+              />
             </div>
           )}
 
@@ -386,6 +513,38 @@ export default function Studio({
           </aside>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * "この素材はどこから来たのか" for whatever is on screen right now.
+ *
+ * Sits directly under the timeline because that is where the question gets
+ * asked - the user clicks a clip and wants to know whether it is their
+ * photo or something Kairo produced, without leaving the preview.
+ */
+function MaterialSourceBar({
+  entry,
+  onOpenUsage,
+}: {
+  entry: MaterialUsageEntry | null;
+  onOpenUsage: () => void;
+}) {
+  if (entry == null) return null;
+  return (
+    <div className="material-source-bar">
+      <span className={`origin-badge origin-${entry.origin}`}>{entry.origin_label}</span>
+      <span className="material-source-name">
+        {entry.filename || `Scene ${entry.scene_number}`}
+      </span>
+      <span className="material-plan-dim">
+        {formatTime(entry.start)}〜{formatTime(entry.end)}
+        {entry.source_start != null && ` / 元素材 ${formatTime(entry.source_start)}〜`}
+      </span>
+      {entry.note && <span className="material-plan-dim">{entry.note}</span>}
+      <span style={{ flex: 1 }} />
+      <button onClick={onOpenUsage}>使用素材の一覧</button>
     </div>
   );
 }

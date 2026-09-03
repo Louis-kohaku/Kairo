@@ -43,6 +43,11 @@ class StartRunRequest(BaseModel):
     target_duration_seconds: float = Field(default=60.0, gt=3, le=1800)
     orientation: str = "vertical"
     mode: str = "full_auto"
+    # How the user wants their own material used: ai_auto (default) /
+    # use_all / selected. Carried on the run rather than in settings
+    # because it is a decision about this video, not a preference.
+    material_mode: str = "ai_auto"
+    selected_asset_ids: list[str] = Field(default_factory=list)
 
 
 class ChatRequest(BaseModel):
@@ -85,6 +90,8 @@ async def start_run(project_id: str, payload: StartRunRequest, db: Session = Dep
             target_duration_seconds=payload.target_duration_seconds,
             orientation=payload.orientation,
             mode=payload.mode,
+            material_mode=payload.material_mode,
+            selected_asset_ids=payload.selected_asset_ids,
         )
     except run_service.RunError as exc:
         raise HTTPException(409, str(exc)) from exc

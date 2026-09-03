@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { api } from "../../api/client";
 import type { MediaAsset, ProductionEvent, Scene } from "../../types";
-import { VISUAL_TYPE_LABELS } from "../../types";
+import { MATERIAL_ORIGIN_LABELS, VISUAL_TYPE_LABELS } from "../../types";
 import { formatTime } from "../../utils/format";
 
 /**
@@ -104,9 +104,14 @@ function SceneDetailCard({
   const [narration, setNarration] = useState(scene.narration);
   const [saving, setSaving] = useState(false);
 
-  // Only footage can stand in for a scene's visual; audio assets (the
-  // generated BGM among them) would produce a black frame.
-  const videoAssets = assets.filter((a) => a.kind === "video");
+  // Anything with a picture can stand in for a scene's visual - the
+  // user's photos as much as their footage. Audio assets (the generated
+  // BGM among them) are excluded because they would produce a black frame.
+  // Clips Kairo rendered are excluded too: pinning a scene to its own
+  // output would re-wrap the previous render on every rebuild.
+  const pinnableAssets = assets.filter(
+    (a) => (a.kind === "video" || a.kind === "image") && (a.origin ?? "user") === "user",
+  );
 
   const save = async (patch: Parameters<typeof api.updateScene>[1]) => {
     setSaving(true);
@@ -179,11 +184,17 @@ function SceneDetailCard({
         )}
         <dt>素材</dt>
         <dd>
-          {scene.asset_source === "user"
-            ? "ユーザー素材を使用"
-            : scene.media_asset_id
-              ? "AI生成済み"
-              : "未生成"}
+          {MATERIAL_ORIGIN_LABELS[
+            (scene.material_origin || "") as keyof typeof MATERIAL_ORIGIN_LABELS
+          ] ??
+            (scene.asset_source === "user"
+              ? "ユーザー素材を使用"
+              : scene.media_asset_id
+                ? "生成済み"
+                : "未生成")}
+          {scene.material_note && (
+            <span className="scene-detail-dur">{scene.material_note}</span>
+          )}
         </dd>
       </dl>
 
@@ -239,8 +250,9 @@ function SceneDetailCard({
               disabled={saving}
             >
               <option value="__ai__">AIが生成する</option>
-              {videoAssets.map((a) => (
+              {pinnableAssets.map((a) => (
                 <option key={a.id} value={a.id}>
+                  {a.kind === "image" ? "🖼 " : "🎬 "}
                   {a.original_filename}
                 </option>
               ))}

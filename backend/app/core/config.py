@@ -38,7 +38,23 @@ DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
 # path traversal / arbitrary file writes when handling uploads).
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
-ALLOWED_MEDIA_EXTENSIONS = ALLOWED_VIDEO_EXTENSIONS | ALLOWED_AUDIO_EXTENSIONS
+# Stills the user supplies as material. Restricted to what both Pillow and
+# FFmpeg can read, because every one of them has to survive analysis
+# (Pillow) *and* being turned into a clip (FFmpeg) - accepting a format
+# only one of the two understands would fail halfway through a production
+# instead of at import time.
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+ALLOWED_MEDIA_EXTENSIONS = (
+    ALLOWED_VIDEO_EXTENSIONS | ALLOWED_AUDIO_EXTENSIONS | ALLOWED_IMAGE_EXTENSIONS
+)
+
+# Upload ceiling per file. Not a security boundary (this is a local app) but
+# a way to fail with "この画像は大きすぎます" at import instead of with an
+# out-of-memory error three phases into a production.
+MAX_UPLOAD_BYTES = int(os.environ.get("KAIRO_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
+# Pillow refuses images beyond this many pixels as a decompression-bomb
+# guard; Kairo reports the same limit up front with a usable message.
+MAX_IMAGE_PIXELS = 80_000_000
 
 # Default render target. Individual projects can override resolution/fps.
 DEFAULT_WIDTH = 1920

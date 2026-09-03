@@ -2,11 +2,20 @@
 
 Three stages live here, in the order the pipeline runs them:
 
-1. `render_scene_visual` - the scene's key visual. A clip the user supplied
-   wins outright (section 24); otherwise a downloaded diffusion engine is
-   used if there is one, and otherwise Kairo composes the frame itself
-   (`image_engines.procedural`), which is what makes "素材ゼロでも完成
-   する" true rather than aspirational.
+1. `render_scene_visual` - the scene's key visual, for a scene nothing was
+   pinned to. A downloaded diffusion engine is used if there is one, and
+   otherwise Kairo composes the frame itself (`image_engines.procedural`),
+   which is what makes "素材ゼロでも完成する" true rather than aspirational.
+   `fill_missing_visual` sits above it and walks the whole priority order:
+   a licensed web image first, then generation, then composition, with the
+   choice recorded on the scene so the finished video can say where each
+   shot came from.
+
+   Material the user supplied never reaches either of them. It is pinned
+   to the scene by the matching stage (`material_plan`), resolved here by
+   `resolve_pinned_source`, and used directly - a photo gets the scene's
+   camera move, a video gets cut from the interval the analysis found
+   usable.
 
 2. `synthesize_narration` - speech for the scene, then `retime_from_narration`,
    which is the point of doing this before assembly: a scene whose planned
@@ -23,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.paths import assets_dir, project_dir
@@ -30,10 +40,11 @@ from app.models.media_asset import MediaAsset
 from app.models.production import Scene
 from app.models.project import Project
 from app.schemas.studio import ProductionStrategy
-from app.services import image_engines, tts_service
+from app.services import image_engines, media_service, tts_service
 from app.services.ffmpeg import compose
 from app.services.ffmpeg.probe import probe_media
 from app.services.image_engines.procedural import SceneVisualSpec, resolve_camera
+from app.services.studio import web_material_service
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +169,7 @@ def build_scene_clip(
     visual_path: Path | None,
     narration_path: Path | None,
     source_video: Path | None = None,
+    source_start: float = 0.0,
     crf: int = 20,
     is_last: bool = False,
 ) -> Path:
@@ -183,6 +195,11 @@ def build_scene_clip(
             project.fps,
             audio_path=narration_path,
             crf=crf,
+            source_start=source_start,
+            # The user's own footage is almost never shot in the aspect
+            # ratio of the short being made. Letterboxing it would hand
+            # back half the screen as black bars, so it fills the frame.
+            fill="cover",
         )
     else:
         if visual_path is None:
@@ -247,6 +264,11 @@ def register_clip_asset(db, project: Project, scene: Scene, clip_path: Path, ind
         has_audio=info.has_audio,
         video_codec=info.video_codec,
         audio_codec=info.audio_codec,
+        # A rendered scene clip is not material the user can be offered
+        # again; marking it keeps it out of the material list and out of
+        # the matching pool.
+        origin="kairo_clip",
+        analysis_status="skipped",
     )
     db.add(asset)
     db.commit()
@@ -258,20 +280,50 @@ def register_clip_asset(db, project: Project, scene: Scene, clip_path: Path, ind
     return asset
 
 
-def resolve_user_source(db, scene: Scene, project_id: str) -> Path | None:
-    """The user's own footage for this scene, when they pinned one.
+@dataclass
+class UserSource:
+    """The user's own material for one scene, resolved to a real file."""
+
+    path: Path
+    kind: str  # "video" | "image"
+    start: float = 0.0
+    asset_id: str = ""
+    filename: str = ""
+
+
+def resolve_pinned_source(db, scene: Scene, project_id: str) -> UserSource | None:
+    """The user's own material for this scene, when one is pinned.
 
     Reads `user_asset_id`, never `media_asset_id`: the latter is the clip
     Kairo rendered, and using it here would make each rebuild re-wrap the
     previous render instead of the original source.
+
+    Photos count as well as footage. When the material pipeline started
+    placing the user's stills into scenes, restricting this to videos was
+    what silently replaced them with generated frames - the pin was set,
+    and the asset stage could not see it.
     """
-    if scene.asset_source != "user" or not scene.user_asset_id:
+    # "user" is the user's own file; "web" is a licensed image Kairo
+    # downloaded for a beat their material did not cover. Both are real
+    # files pinned to the scene, and both are rendered the same way - what
+    # differs is the provenance recorded in `material_origin`.
+    if scene.asset_source not in ("user", "web") or not scene.user_asset_id:
         return None
     asset = db.get(MediaAsset, scene.user_asset_id)
-    if asset is None or asset.project_id != project_id or asset.kind != "video":
+    if asset is None or asset.project_id != project_id:
+        return None
+    if asset.kind not in ("video", "image"):
         return None
     path = project_dir(project_id) / asset.stored_path
-    return path if path.exists() else None
+    if not path.exists():
+        return None
+    return UserSource(
+        path=path,
+        kind=asset.kind,
+        start=float(scene.user_asset_start or 0.0),
+        asset_id=asset.id,
+        filename=asset.original_filename,
+    )
 
 
 def rebuild_scene(
@@ -297,10 +349,20 @@ def rebuild_scene(
     explicitly asked to regenerate, which is what makes both resume and
     "just change the duration" cheap: only the clip is re-encoded.
     """
-    user_source = resolve_user_source(db, scene, project.id)
+    user_source = resolve_pinned_source(db, scene, project.id)
 
     visual_path: Path | None = None
-    if user_source is None:
+    video_source: Path | None = None
+    source_start = 0.0
+    if user_source is not None and user_source.kind == "video":
+        video_source = user_source.path
+        source_start = user_source.start
+    elif user_source is not None:
+        # A user photo is used exactly as the generated still would be, so
+        # it gets the same Ken Burns move from the scene's camera direction
+        # rather than sitting motionless for three seconds.
+        visual_path = user_source.path
+    else:
         visual_path = scene_visual_dir(project.id) / f"scene_{index:03d}_{scene.id[:8]}.png"
         if regenerate_visual or not visual_path.exists():
             visual_path = render_scene_visual(
@@ -323,8 +385,86 @@ def rebuild_scene(
         project,
         visual_path=visual_path,
         narration_path=narration_path,
-        source_video=user_source,
+        source_video=video_source,
+        source_start=source_start,
         crf=crf,
         is_last=is_last,
     )
     return register_clip_asset(db, project, scene, clip, index)
+
+
+# ------------------------------------------------------- filling the gaps
+
+
+def fill_missing_visual(
+    db,
+    project: Project,
+    scene: Scene,
+    index: int,
+    strategy: ProductionStrategy,
+    *,
+    keywords: list[str],
+    sources: list[str],
+    orientation: str = "vertical",
+) -> tuple[str, str]:
+    """Produces a visual for a beat the user's material did not cover.
+
+    Walks the priority order (design requirement 7) downwards from the
+    first source that is actually available, and returns the origin it
+    ended up using with a one-line explanation. Falling through is not a
+    failure: an unreachable web source or an absent diffusion model simply
+    means the next source is used, and the reason is recorded so the
+    completion screen can say what happened instead of showing a shot with
+    no explanation.
+    """
+    if "web" in sources:
+        try:
+            results = web_material_service.search(keywords, limit=3, orientation=orientation)
+        except Exception:  # noqa: BLE001
+            logger.exception("Web material search failed for scene %s", scene.id)
+            results = []
+        for candidate in results:
+            try:
+                path = web_material_service.download(candidate, project.id)
+            except web_material_service.WebMaterialUnavailable as exc:
+                logger.info("Web material rejected: %s", exc)
+                continue
+            try:
+                asset = media_service.register_file(
+                    db,
+                    project.id,
+                    path,
+                    original_filename=candidate.title or path.name,
+                    origin="web",
+                    origin_detail=(
+                        f"{candidate.attribution} / {candidate.source_page or candidate.url}"
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not register downloaded web material")
+                path.unlink(missing_ok=True)
+                continue
+            scene.asset_source = "web"
+            scene.user_asset_id = asset.id
+            scene.user_asset_start = None
+            scene.user_asset_end = None
+            scene.material_origin = "web"
+            scene.material_note = f"Web素材: {candidate.attribution}"
+            db.commit()
+            return "web", scene.material_note
+
+    if "ai_generated" in sources:
+        try:
+            render_scene_visual(scene, index, project, strategy, engine_id="sd")
+            scene.material_origin = "ai_generated"
+            scene.material_note = "不足していたためAI画像生成で補完しました"
+            db.commit()
+            return "ai_generated", scene.material_note
+        except Exception:  # noqa: BLE001
+            logger.exception("AI image generation failed for scene %s", scene.id)
+
+    render_scene_visual(scene, index, project, strategy, engine_id="procedural")
+    scene.material_origin = "procedural"
+    scene.material_note = "不足していたためKairoが構成した背景で補完しました"
+    db.commit()
+    return "procedural", scene.material_note

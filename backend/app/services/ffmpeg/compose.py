@@ -153,16 +153,40 @@ def video_to_clip(
     *,
     audio_path: Optional[Path] = None,
     crf: int = 20,
+    source_start: float = 0.0,
+    fill: str = "pad",
 ) -> None:
     """Fits existing footage (the user's own, or an AI-generated clip) into
-    a scene slot: scaled and padded into frame, looped when it is shorter
-    than the slot, and given the scene's narration as its audio."""
+    a scene slot: scaled into frame, looped when it is shorter than the
+    slot, and given the scene's narration as its audio.
+
+    `source_start` is where in the source to cut from - the material
+    analysis decides that, because taking every clip from 0:00 wastes the
+    usable part of a phone video that starts on a pocket shot.
+
+    `fill` picks between letterboxing ("pad") and filling the frame by
+    cropping ("cover"). Cover is what a 16:9 holiday video needs to become
+    a 9:16 short without two black bars taking half the screen; pad stays
+    available for material where losing the edges would lose the subject.
+    """
     duration = max(0.2, duration)
-    vf = (
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}"
-    )
-    args: list[str] = ["-stream_loop", "-1", "-i", str(src)]
+    if fill == "cover":
+        vf = (
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},setsar=1,fps={fps}"
+        )
+    else:
+        vf = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}"
+        )
+    args: list[str] = ["-stream_loop", "-1"]
+    if source_start > 0.05:
+        # Before -i so ffmpeg seeks rather than decoding and discarding;
+        # -stream_loop restarts from this point, which is what we want -
+        # a loop back into the unusable head would undo the choice.
+        args += ["-ss", f"{source_start:.3f}"]
+    args += ["-i", str(src)]
     if audio_path is not None:
         args += ["-i", str(audio_path)]
         audio_chain = f"[1:a]aresample=48000,apad,atrim=0:{duration:.3f},asetpts=N/SR/TB[a]"
@@ -190,6 +214,38 @@ def video_to_clip(
         str(dest),
     ]
     _run(args, total_duration=duration)
+
+
+def extract_frames(src: Path, dest_dir: Path, timestamps: list[float], width: int = 512) -> list[Path]:
+    """Grabs one JPEG per timestamp from a video.
+
+    Used by material analysis, which needs actual pixels to say anything
+    about brightness, movement or content - metadata alone cannot tell a
+    dark pocket shot from a bright beach.
+
+    A frame that cannot be decoded is skipped rather than failing the
+    whole analysis: a video whose last second is truncated is still
+    perfectly usable material.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    produced: list[Path] = []
+    for i, ts in enumerate(timestamps):
+        dest = dest_dir / f"frame_{i:02d}.jpg"
+        args = [
+            "-ss", f"{max(0.0, ts):.3f}",
+            "-i", str(src),
+            "-frames:v", "1",
+            "-vf", f"scale={width}:-2:force_original_aspect_ratio=decrease",
+            "-q:v", "4",
+            str(dest),
+        ]
+        try:
+            _run(args)
+        except Exception:
+            continue
+        if dest.exists() and dest.stat().st_size > 0:
+            produced.append(dest)
+    return produced
 
 
 # Chord voicings (Hz) per mood, as simple triads in a comfortable pad

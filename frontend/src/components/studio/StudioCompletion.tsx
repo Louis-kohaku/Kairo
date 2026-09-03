@@ -18,6 +18,7 @@ export default function StudioCompletion({
   onOpenEditor,
   onPreview,
   onImproveMore,
+  onShowMaterials,
 }: {
   run: ProductionRun;
   project: Project;
@@ -25,6 +26,7 @@ export default function StudioCompletion({
   onOpenEditor: () => void;
   onPreview: () => void;
   onImproveMore: () => void;
+  onShowMaterials?: () => void;
 }) {
   const [filename, setFilename] = useState<string | null>(null);
 
@@ -45,6 +47,12 @@ export default function StudioCompletion({
   }, [jobId]);
 
   const improvedCount = run.improvement?.applied.length ?? 0;
+  // Stated on the completion screen rather than only in the 使用素材 tab:
+  // "自分の写真がちゃんと使われたのか" is the first thing a user who
+  // uploaded material wants to know, and making them go looking for it
+  // invites the suspicion that it was quietly replaced.
+  const plan = run.material_plan;
+  const userCuts = plan ? plan.used_photo_count + plan.used_video_count : 0;
 
   return (
     <div className="studio-complete">
@@ -66,6 +74,14 @@ export default function StudioCompletion({
           {improvedCount > 0 ? `（${improvedCount}件を修正）` : "（修正の必要はありませんでした）"}
         </li>
         <li>✓ FFmpegでMP4を書き出し完了</li>
+        {plan && (plan.user_photo_count > 0 || plan.user_video_count > 0) && (
+          <li>
+            ✓ ユーザー素材を{userCuts}カットで使用
+            {plan.shortages.length > 0
+              ? `（不足${plan.shortages.length}カットを補完）`
+              : "（補完なし）"}
+          </li>
+        )}
       </ul>
 
       {filename && <div className="studio-complete-file">ファイル名: {filename}</div>}
@@ -78,6 +94,9 @@ export default function StudioCompletion({
           <a className="button-link" href={api.downloadUrl(jobId)} download>
             ⬇ MP4を保存
           </a>
+        )}
+        {onShowMaterials && (
+          <button onClick={onShowMaterials}>🖼 使用素材を見る</button>
         )}
         <button onClick={onOpenEditor}>✂ 手動で編集</button>
         <button onClick={onImproveMore}>💬 AIにもう一度改善させる</button>

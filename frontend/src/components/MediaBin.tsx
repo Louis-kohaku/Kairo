@@ -70,7 +70,11 @@ export default function MediaBin({
             }}
           >
             <div className="media-item-name" title={asset.original_filename}>
-              {asset.kind === "video" ? "\u{1F3AC}" : "\u{1F3B5}"}{" "}
+              {asset.kind === "video"
+                ? "\u{1F3AC}"
+                : asset.kind === "image"
+                  ? "\u{1F5BC}"
+                  : "\u{1F3B5}"}{" "}
               {asset.original_filename}
             </div>
             <div className="media-item-meta">
@@ -78,9 +82,15 @@ export default function MediaBin({
               {asset.width ? ` · ${asset.width}x${asset.height}` : ""}
             </div>
             <div className="media-item-actions">
-              <button onClick={() => onAddToTrack(asset.id, "video")}>
-                映像トラックへ
-              </button>
+              {asset.kind === "image" ? (
+                <span style={{ color: "var(--text-dim)", fontSize: 12 }}>
+                  写真はオートモードの素材として使えます
+                </span>
+              ) : (
+                <button onClick={() => onAddToTrack(asset.id, "video")}>
+                  映像トラックへ
+                </button>
+              )}
               {asset.has_audio && (
                 <button onClick={() => onAddToTrack(asset.id, "audio")}>
                   BGMへ

@@ -72,6 +72,13 @@ class ProductionRun(Base):
     # JSON blobs for the artefacts each stage produces. Stored as text so
     # the shape can evolve without a migration; the pydantic schemas in
     # app/schemas/studio.py are the contract for reading them back.
+    # How the user wants their own material used: ai_auto (Kairo picks),
+    # use_all (fit every uploaded file in), selected (only the ids below).
+    material_mode: Mapped[str] = mapped_column(String, default="ai_auto")
+    # JSON list of asset ids, only meaningful in "selected" mode.
+    selected_asset_ids: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    material_plan_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     research_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     strategy_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     quality_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

@@ -114,6 +114,33 @@ def enqueue_scene_regenerate_job(db: Session, project_id: str, scene_id: str) ->
     )
 
 
+def enqueue_material_reeval_job(
+    db: Session,
+    project_id: str,
+    *,
+    mode: str = "ai_auto",
+    selected_ids: list[str] | None = None,
+    rerender: bool = True,
+) -> Job:
+    """Re-matches material over an existing production and rebuilds what
+    changed. A job rather than a request-time call because it re-encodes
+    scenes and re-renders the MP4."""
+    from app.services.studio import material_reeval
+
+    return _enqueue(
+        db,
+        project_id,
+        "material_reeval",
+        lambda job_id: material_reeval.run_reevaluate(
+            project_id,
+            job_id,
+            mode=mode,
+            selected_ids=selected_ids or [],
+            rerender=rerender,
+        ),
+    )
+
+
 def enqueue_image_to_video_job(db: Session, project_id: str, generation_id: str) -> Job:
     return _enqueue(
         db,
