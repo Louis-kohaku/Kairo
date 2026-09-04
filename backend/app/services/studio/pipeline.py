@@ -41,6 +41,7 @@ from app.models.project import Project
 from app.models.studio import ProductionRun
 from app.models.subtitle import SubtitleCue
 from app.schemas.material import ORIGIN_LABELS
+from app.schemas.edit_style import EditDirective
 from app.schemas.production_assets import AssetDecisions
 from app.schemas.review import IterationRecord, VideoReview
 from app.schemas.studio import ProductionStrategy, ResearchResult
@@ -58,18 +59,25 @@ from app.services.studio import (
     assembly_service,
     control,
     creative_director,
+    edit_director,
     events,
+    hook_optimizer,
     material_analysis,
     material_plan,
     material_service,
     model_service,
     phases,
     planning_service,
+    platform_presets,
     quality_service,
     refinement,
     report as report_service,
     research_service,
     reviewer,
+    scene_budget,
+    style_memory,
+    subtitle_design,
+    transition_planner,
 )
 from app.services.studio.control import RunStopped
 from app.services.trends import service as trend_service
@@ -125,6 +133,13 @@ class Pipeline:
         # asset choices the earlier phases actually acted on instead of
         # quietly re-deciding behind the user's back.
         self.trend: TrendContext = self._load_model(TrendContext, self.run.trend_json)
+        # The編集方針 this run is cut to. Restored rather than recomputed so a
+        # resumed run uses the decisions the user was shown, and defaulted to
+        # an empty directive so every stage can read it before the direction
+        # phase has run (a resumed run enters partway through).
+        self.directive: EditDirective = (
+            edit_director.from_json(self.run.direction_json) or EditDirective()
+        )
         self.decisions: AssetDecisions | None = (
             self._load_optional(AssetDecisions, self.run.assets_json)
         )
@@ -328,6 +343,55 @@ class Pipeline:
             + scene_guidance
         )
 
+    def _analyses(self) -> list:
+        """Every cached material analysis for this project's usable material.
+
+        Read from the asset rows rather than passed down from
+        `phase_material_analysis`, because a resumed run skips that phase
+        and the direction stage still has to know what the material is.
+        Material the user excluded in "選択した素材だけ使う" mode is filtered
+        out here too, so the directive is made from the same set the script
+        and the matcher will see.
+        """
+        from app.services import media_service
+
+        assets = media_service.list_user_material(self.db, self.project.id)
+        if self._material_mode() == "selected":
+            wanted = set(self._selected_asset_ids())
+            assets = [a for a in assets if a.id in wanted]
+        out = []
+        for asset in assets:
+            cached = material_analysis.load_analysis(asset)
+            if cached is not None:
+                out.append(cached)
+        return out
+
+    def _ensure_directive(self):
+        """The directive, building a defaults-only one if none exists yet.
+
+        A run resumed from before the director existed, or one whose
+        direction phase was skipped, must still have something typed for
+        the later stages to read. Built without the model so it is instant
+        and cannot fail; `decided_by` stays "defaults", which is what the
+        UI shows.
+        """
+        if self.directive.style_label:
+            return self.directive
+        self.directive = edit_director.decide(
+            self.run.instruction,
+            duration_seconds=self._target_seconds(),
+            orientation=self.run.orientation,
+            width=self.project.width,
+            height=self.project.height,
+            trend=self.trend,
+            analyses=self._analyses(),
+            platform=self.run.platform
+            or platform_presets.detect(self.run.instruction, self.run.orientation),
+            style_override=(self.run.edit_style or None),
+            use_ai=False,
+        )
+        return self.directive
+
     def _target_seconds(self) -> float:
         return max(5.0, float(self.run.target_duration_seconds))
 
@@ -517,11 +581,45 @@ class Pipeline:
                 ),
             )
 
+        # Duplicates are a relationship between two files, so they can only
+        # be found once every file has been analysed. Marked rather than
+        # removed: one of a burst of three may be the one the user wants,
+        # and the matching stage only down-ranks the later copies.
+        duplicates = material_analysis.mark_duplicates(self.db, analyses)
+        if duplicates:
+            self.event(
+                "material_analysis",
+                status="info",
+                message="{0}点が既存の素材とよく似ています".format(duplicates),
+                reason="同じ画が何度も出ないよう、2枚目以降は優先度を下げます",
+            )
+
+        # What the analysis found technically unusable. Reported, never
+        # silently dropped - the user chose to upload these, and telling
+        # them why a photo was not used is the point of requirement 7.
+        weak = [
+            a
+            for a in analyses
+            if a.quality_score is not None and a.quality_score < 50
+        ]
+        for analysis in weak[:5]:
+            asset_name = next(
+                (x.original_filename for x in assets if x.id == analysis.asset_id), ""
+            )
+            self.event(
+                "material_analysis",
+                status="info",
+                message="{0}: 品質スコア{1:.0f}".format(asset_name, analysis.quality_score),
+                reason=" / ".join(analysis.quality_notes) or "技術的な品質が低い素材です",
+            )
+
         self._material_hint = self._build_material_hint(analyses)
         self._material_brief = self._build_material_hint(analyses, with_scene_count=False)
         summary = "{0}点の素材を解析しました".format(len(analyses))
         if failed:
             summary += "（{0}点は解析できませんでした）".format(failed)
+        if weak:
+            summary += "（品質が低い素材{0}点を確認）".format(len(weak))
         self._finish_phase("material_analysis", summary)
 
     def phase_material_match(self) -> None:
@@ -678,6 +776,67 @@ class Pipeline:
         else:
             self._finish_phase("trends", f"ジャンル定石で進めます（{self.trend.reason}）")
 
+    def phase_direction(self) -> None:
+        """The編集ディレクター: what kind of video this is (requirement 1).
+
+        Runs before the strategy so every later stage - the writer, the
+        font selection, the transition planner, the colour pass, the
+        renderer and the reviewer - argues from one set of typed decisions
+        instead of each re-reading the user's one-line brief its own way.
+
+        Never fails the run. A directive can always be produced from the
+        style presets alone, and `decided_by` records how much evidence
+        actually went into it.
+        """
+        self.event(
+            "direction",
+            task="この動画の編集方針を決めています",
+            message="ジャンル・スタイル・テンポ・構成・字幕・フォント・切り替え・色味を決定します",
+            reason="編集を始める前に「どういう動画を作るか」を確定させるため",
+            next_task="制作戦略",
+        )
+
+        analyses = self._analyses()
+        platform = self.run.platform or platform_presets.detect(
+            self.run.instruction, self.run.orientation
+        )
+        self.directive = edit_director.decide(
+            self.run.instruction,
+            duration_seconds=self._target_seconds(),
+            orientation=self.run.orientation,
+            width=self.project.width,
+            height=self.project.height,
+            trend=self.trend,
+            analyses=analyses,
+            platform=platform,
+            style_override=(self.run.edit_style or None),
+            use_ai=True,
+        )
+        self.run.platform = self.directive.platform
+        self.run.edit_style = self.directive.style
+        self.run.direction_json = edit_director.to_json(self.directive)
+        self.db.commit()
+
+        # Reported line by line rather than as one blob: this is the panel
+        # the user reads to understand the video before it exists, and a
+        # decision they cannot see is a decision they cannot correct.
+        for line in edit_director.summary_lines(self.directive):
+            self.event("direction", status="info", message=line)
+        for note in self.directive.notes[:10]:
+            self.event("direction", status="info", message=note, reason="編集方針の根拠")
+        if self.directive.ai_note:
+            self.event(
+                "direction",
+                status="info",
+                message=self.directive.ai_note,
+                reason=f"判断の根拠: {self.directive.decided_by}",
+            )
+
+        self._finish_phase(
+            "direction",
+            f"編集方針「{self.directive.style_label} / {self.directive.mood}」を決定しました",
+        )
+
     def phase_strategy(self) -> None:
         self.event(
             "strategy",
@@ -691,7 +850,9 @@ class Pipeline:
             self.research,
             self.run.orientation,
             material_hint=self._material_brief,
+            directive=self.directive,
         )
+        self._apply_directive_to_strategy()
         self._apply_genre_profile()
         self.run.strategy_json = json.dumps(self.strategy.model_dump(), ensure_ascii=False)
         self.db.commit()
@@ -702,6 +863,62 @@ class Pipeline:
             reason=f"差別化: {self.strategy.differentiation}",
         )
         self._finish_phase("strategy", f"戦略「{self.strategy.title}」を決定しました")
+
+    def _apply_directive_to_strategy(self) -> None:
+        """Makes the directive bind the writing brief.
+
+        The strategy is written by the model from the same instruction, so
+        it can and does come back with a cut length or a BGM mood that
+        contradicts the directive the user was just shown. The directive
+        wins on the numbers - those are the decisions the編集 stages
+        actually execute - while the prose (concept, differentiation) stays
+        the strategy's own.
+        """
+        directive = self.directive
+        changes: list[str] = []
+
+        low = round(max(1.0, min(directive.scene_seconds_min, directive.scene_seconds)), 2)
+        high = round(max(low + 0.5, directive.scene_seconds_max), 2)
+        if abs(self.strategy.scene_seconds_min - low) >= 0.15:
+            changes.append(
+                f"1カットの下限 {self.strategy.scene_seconds_min:.1f}秒 → {low:.1f}秒"
+            )
+        if abs(self.strategy.scene_seconds_max - high) >= 0.15:
+            changes.append(
+                f"1カットの上限 {self.strategy.scene_seconds_max:.1f}秒 → {high:.1f}秒"
+            )
+        self.strategy.scene_seconds_min = low
+        self.strategy.scene_seconds_max = high
+
+        if directive.audio.bgm_mood and self.strategy.bgm_mood != directive.audio.bgm_mood:
+            changes.append(f"BGMの雰囲気を「{directive.audio.bgm_mood}」に統一")
+            self.strategy.bgm_mood = directive.audio.bgm_mood
+
+        if directive.hook_direction and not (self.strategy.hook or "").strip():
+            self.strategy.hook = directive.hook_direction
+        if directive.ending_direction and not (self.strategy.ending or "").strip():
+            self.strategy.ending = directive.ending_direction
+        if directive.cta and not (self.strategy.ending or "").strip():
+            # The platform's closing convention, used only when neither the
+            # model nor the directive said how to end. A CTA that nothing
+            # ever reads would be a field in a panel with no effect on the
+            # finished video.
+            self.strategy.ending = directive.cta
+            changes.append(f"終わり方: {directive.cta}")
+        if directive.energy_curve and not self.strategy.emotional_arc:
+            self.strategy.emotional_arc = list(directive.energy_curve)
+        if not (self.strategy.visual_style or "").strip():
+            self.strategy.visual_style = f"{directive.style_label} / {directive.color.label}"
+        if not (self.strategy.subtitle_policy or "").strip():
+            self.strategy.subtitle_policy = directive.subtitle.reason
+
+        for change in changes:
+            self.event(
+                "strategy",
+                status="info",
+                message=change,
+                reason=f"編集方針（{directive.style_label}）に合わせたため",
+            )
 
     def _apply_genre_profile(self) -> None:
         """Nudges the strategy towards the genre's measured conventions.
@@ -873,6 +1090,7 @@ class Pipeline:
         )
         planning_service.retime_scenes(self.scenes, self._target_seconds(), self.strategy)
         self.db.commit()
+        self._fit_scenes_to_material()
         total = sum(s.estimated_duration for s in self.scenes)
         self.event(
             "scenes",
@@ -881,6 +1099,138 @@ class Pipeline:
             reason=f"1シーン{self.strategy.scene_seconds_min:.1f}〜{self.strategy.scene_seconds_max:.1f}秒を基準",
         )
         self._finish_phase("scenes")
+
+    def _recompose_cues(self) -> list:
+        """Rebuilds the caption track *with* its design, and writes the SRT.
+
+        Every stage that changes a scene has to redo the captions, because
+        their timings come from the scene durations. Composing them without
+        re-running the design would silently strip the emphasis, the
+        entrance animation and the density filter from every re-render - so
+        the first render would have designed captions and the improved one
+        would not, which is the wrong way round.
+        """
+        decision = self.decisions.subtitle if self.decisions else None
+        budget = (
+            decision.max_chars_per_line
+            if decision and decision.max_chars_per_line
+            else self._caption_budget()
+        )
+        cues = assembly_service.compose_cues(
+            self.db, self.project.id, self.scenes, budget
+        )
+        directive = self._ensure_directive()
+        plan = subtitle_design.design(cues, directive)
+        subtitle_design.apply(self.db, cues, plan)
+        self.run.subtitle_design_json = subtitle_design.to_json(plan)
+        self.db.commit()
+        cues = self._cues()
+        assembly_service.write_srt(self.project.id, cues)
+        return cues
+
+    def _fit_scenes_to_material(self) -> None:
+        """Cuts the design down to what the material can actually cover.
+
+        Requirement 8's last rule, enforced rather than suggested. The
+        writing prompt already asks for a scene count near the material
+        count, but a small local model treats that as advice: measured on
+        this repository, eight photos and a 30-second target produced
+        fifteen scenes, and eight of them were filled from a web image
+        search that returned a nebula and a billboard.
+
+        Dropping scenes here - before anything is encoded - costs one
+        database delete each, and `retime_scenes` then gives their seconds
+        back to the shots that remain, so the video is the requested length
+        with fewer, longer, better-covered cuts.
+        """
+        analyses = self._analyses()
+        if not analyses:
+            return
+        directive = self._ensure_directive()
+        limit = scene_budget.budget(
+            analyses,
+            directive.scene_seconds,
+            use_all=self._material_mode() == "use_all",
+        )
+        if limit <= 0 or len(self.scenes) <= limit:
+            return
+
+        before = len(self.scenes)
+        kept, notes = scene_budget.trim_to_budget(self.scenes, limit)
+        dropped = [s for s in self.scenes if s not in kept]
+        for scene in dropped:
+            self.db.delete(scene)
+        self.scenes = kept
+        for i, scene in enumerate(self.scenes):
+            scene.order_index = i
+        self.db.commit()
+
+        # The scenes that remain absorb the time the dropped ones held, so
+        # the video is still the length the user asked for.
+        planning_service.retime_scenes(
+            self.scenes, self._target_seconds(), self.strategy
+        )
+        planning_service.recompute_start_times(self.scenes)
+        self.db.commit()
+
+        for note in notes:
+            self.event(
+                "scenes",
+                status="info",
+                message=note,
+                reason=(
+                    f"素材{len(analyses)}点でカバーできるのは約{limit}カットまでです。"
+                    "これを超えると、無関係なWeb素材で埋めることになります。"
+                ),
+            )
+        logger.info(
+            "Trimmed scene design from %s to %s for %s pieces of material",
+            before,
+            len(self.scenes),
+            len(analyses),
+        )
+
+    def _optimize_hook(self) -> None:
+        """The first three seconds (requirement 9).
+
+        Run at the top of the asset phase, which is the last moment the
+        scene order can still change for free: nothing has been encoded
+        yet, so moving a shot to the front costs one reordering rather than
+        a re-render.
+        """
+        directive = self._ensure_directive()
+        analyses = {a.asset_id: a for a in self._analyses()}
+        report = hook_optimizer.optimize(
+            self.db, self.scenes, directive, analyses_by_asset=analyses
+        )
+
+        if not report.applicable:
+            self.event(
+                "assets",
+                status="info",
+                message="冒頭最適化はスキップします",
+                reason=report.skipped_reason,
+            )
+            return
+
+        self.event(
+            "assets",
+            task="冒頭の掴みを点検しています",
+            message=f"最初の{directive.hook_seconds:.1f}秒で視聴者を引き込めるかを評価します",
+            reason=f"{directive.platform_label}は冒頭で離脱が決まるため",
+        )
+        for finding in report.findings:
+            self.event("assets", status="info", message=finding)
+        for change in report.changes:
+            self.event(
+                "assets",
+                status="info",
+                message=change,
+                reason="冒頭を強くするための自動修正",
+            )
+        if report.changes:
+            planning_service.recompute_start_times(self.scenes)
+            self.db.commit()
 
     def phase_assets(self) -> None:
         """Puts a real picture behind every scene.
@@ -894,6 +1244,7 @@ class Pipeline:
         sits unused, because the matching stage has already spent it.
         """
         self._ensure_scenes()
+        self._optimize_hook()
         engine_id = self.settings.generation.default_engine_id or "procedural"
         plan = self._material_plan
         sources = (
@@ -1036,18 +1387,21 @@ class Pipeline:
         boundaries.
         """
         self._ensure_scenes()
+        directive = self._ensure_directive()
         total = sum(s.estimated_duration for s in self.scenes)
-        mood = self.strategy.bgm_mood or "gentle"
+        mood = directive.audio.bgm_mood or self.strategy.bgm_mood or "gentle"
         self.event(
             "audio",
             task="BGMと効果音を選んでいます",
             message=f"雰囲気「{mood}」に合うBGMをライブラリから選びます",
-            reason=self.strategy.audio_policy or "ナレーションを邪魔しない音量で敷きます",
+            reason=directive.audio.reason
+            or self.strategy.audio_policy
+            or "ナレーションを邪魔しない音量で敷きます",
             next_task="字幕",
         )
 
         profile = self.trend.profile if self.trend and self.trend.used else None
-        tempo = (profile.cut_tempo if profile and profile.cut_tempo else "medium")
+        tempo = directive.tempo or (profile.cut_tempo if profile and profile.cut_tempo else "medium")
         decisions = creative_director.build(
             self.db,
             genre=self.trend.genre if self.trend else "unknown",
@@ -1061,10 +1415,66 @@ class Pipeline:
             width=self.project.width,
             height=self.project.height,
             require_commercial=self.settings.library.prefer_commercial_safe,
-            target_scene_seconds=max(1.2, self.strategy.scene_seconds_max * 0.8),
+            target_scene_seconds=max(1.2, directive.scene_seconds),
+            directive=directive,
         )
         self.decisions = decisions
         self._persist_decisions()
+
+        # The font decision, with the field it was chosen against. Reported
+        # here rather than only stored, because "毎回同じフォント" was a
+        # problem the user could only see by watching several videos - the
+        # log now says what else was in the running.
+        font = decisions.font
+        ranking = decisions.font_ranking
+        if font is not None and font.found:
+            self.event(
+                "audio",
+                status="info",
+                message=f"フォント: {font.family}",
+                reason=font.reason,
+            )
+            if ranking is not None:
+                self.event(
+                    "audio",
+                    level="tech",
+                    status="info",
+                    message=(
+                        "フォント候補: "
+                        + " / ".join(
+                            f"{c.get('family')}({c.get('score'):.0f})"
+                            for c in ranking.candidates[:5]
+                        )
+                    ),
+                    reason=(
+                        f"{ranking.eligible}書体が対象 / "
+                        f"可読性{ranking.readability_floor}未満を{ranking.below_readability_floor}件除外 / "
+                        f"ライセンスで{ranking.rejected_for_license}件除外"
+                    ),
+                )
+                if ranking.recent_families:
+                    self.event(
+                        "audio",
+                        status="info",
+                        message=(
+                            "直近の動画で使った書体("
+                            + "・".join(ranking.recent_families[:3])
+                            + ")は優先度を下げました"
+                        ),
+                        reason="毎回同じフォントにならないようにするため",
+                    )
+                if not ranking.profiled:
+                    self.event(
+                        "audio",
+                        status="info",
+                        message=(
+                            "フォントの印象プロファイルが未算出のため、可読性中心で選びました。"
+                            "設定 > ライブラリでフォントを再スキャンすると、"
+                            "ジャンルに合わせた選定ができます。"
+                        ),
+                    )
+        elif font is not None:
+            self.event("audio", status="info", message=f"フォント: {font.reason}")
 
         music = decisions.music
         if music is not None and music.found:
@@ -1144,7 +1554,6 @@ class Pipeline:
             next_task="編集",
         )
 
-        decision = self.decisions.subtitle if self.decisions else None
         font = self.decisions.font if self.decisions else None
         if font is not None and font.found:
             self.event(
@@ -1164,12 +1573,33 @@ class Pipeline:
                 reason=font.reason,
             )
 
-        budget = decision.max_chars_per_line if decision and decision.max_chars_per_line else (
-            self._caption_budget()
-        )
-        cues = assembly_service.compose_cues(self.db, self.project.id, self.scenes, budget)
-        assembly_service.write_srt(self.project.id, cues)
-        self._finish_phase("subtitles", f"{len(cues)}件の字幕を作成しました")
+        # Captions as design, not just as text (requirement 4): which words
+        # are enlarged, how each one enters, and - for the styles that ask
+        # for few captions - which ones are not shown at all. Shared with
+        # the improvement and refine phases so a re-rendered video keeps
+        # exactly the captions the first one had.
+        cues = self._recompose_cues()
+        remaining = len(cues)
+        plan = subtitle_design.from_json(self.run.subtitle_design_json)
+        if plan is None:
+            plan = subtitle_design.design(cues, self._ensure_directive())
+
+        self.event("subtitles", status="info", message=plan.summary)
+        emphasised = [c for c in plan.cues if c.emphasis]
+        if emphasised:
+            self.event(
+                "subtitles",
+                status="info",
+                message=(
+                    f"{len(emphasised)}件の字幕で重要語を大きく表示します: "
+                    + " / ".join(
+                        "・".join(c.emphasis) for c in emphasised[:4]
+                    )
+                ),
+                reason="読み飛ばされないよう、意味を担う語だけサイズと太さを変えます",
+            )
+
+        self._finish_phase("subtitles", f"{remaining}件の字幕を作成しました")
 
     def phase_assembly(self) -> None:
         self._ensure_scenes()
@@ -1190,7 +1620,52 @@ class Pipeline:
         self.db.commit()
         duration = assembly_service.assemble(self.db, self.project, self.scenes, self.bgm_asset)
         self._sync_plan_times()
+        self._plan_transitions()
         self._finish_phase("assembly", f"タイムラインに{n}シーン（{duration:.0f}秒）を並べました")
+
+    def _plan_transitions(self) -> None:
+        """Decides where the picture changes (requirement 5).
+
+        Planned here, after the scenes have their final durations, because
+        a transition's affordability depends on how long the shots either
+        side actually are - and those move right up until narration
+        retiming and beat sync are done.
+        """
+        directive = self._ensure_directive()
+        # Chapter starts are the strongest structural signal available and
+        # the pipeline already knows them, so they are handed to the
+        # planner rather than re-derived from the scene text.
+        act_boundaries: set[int] = set()
+        seen_chapters: set[str] = set()
+        for i, scene in enumerate(self.scenes):
+            chapter_id = getattr(scene, "chapter_id", None)
+            if chapter_id and chapter_id not in seen_chapters:
+                seen_chapters.add(chapter_id)
+                if i > 0:
+                    act_boundaries.add(i)
+
+        plan = transition_planner.plan(
+            self.scenes,
+            directive,
+            beat_sync=(self.decisions.beat_sync if self.decisions else None),
+            act_boundaries=act_boundaries,
+        )
+        self.run.transitions_json = transition_planner.to_json(plan)
+        self.db.commit()
+
+        self.event("assembly", status="info", message=plan.summary)
+        for choice in plan.choices:
+            if choice.transition == "cut":
+                continue
+            self.event(
+                "assembly",
+                status="info",
+                message=(
+                    f"Scene {choice.index} → {choice.index + 1}: "
+                    f"{choice.label}（{choice.duration:.2f}秒）"
+                ),
+                reason=f"{choice.reason_label} / {choice.detail}",
+            )
 
     def phase_quality_check(self) -> None:
         self._ensure_scenes()
@@ -1269,10 +1744,7 @@ class Pipeline:
                     message=f"変更後の{scene.estimated_duration:.1f}秒で再生成します",
                 )
                 self._build_clip(scene, i)
-            cues = assembly_service.compose_cues(
-                self.db, self.project.id, self.scenes, self._caption_budget()
-            )
-            assembly_service.write_srt(self.project.id, cues)
+            self._recompose_cues()
             assembly_service.assemble(self.db, self.project, self.scenes, self.bgm_asset)
 
         self.run.improvement_json = json.dumps(improvement.model_dump(), ensure_ascii=False)
@@ -1386,6 +1858,20 @@ class Pipeline:
             self._crf(),
             subtitle_override=self._subtitle_settings(),
             sfx=self._sfx_render_list(),
+            # Where the picture changes, and where it just cuts. Re-read
+            # from the run rather than held in memory so a refinement
+            # re-render and a resumed run use the same plan the user was
+            # shown, instead of re-deciding between iterations.
+            transitions=transition_planner.from_json(self.run.transitions_json),
+            # The colour look for the whole video (requirement 13). Read
+            # from the directive so a re-render after a refinement pass
+            # grades identically - a look that drifted between iterations
+            # would make their review scores incomparable.
+            color=self._ensure_directive().color,
+            # Loudness and noise handling for the finished mix
+            # (requirement 11). Read from the directive so the same
+            # treatment is applied on every iteration.
+            audio=self._ensure_directive().audio,
         )
         self.db.expire_all()
         finished = self.db.get(Job, job.id)
@@ -1427,6 +1913,12 @@ class Pipeline:
             has_bgm=self.bgm_asset is not None,
             has_narration=any(s.narration_duration for s in self.scenes),
             iteration=iteration,
+            # The craft decisions, so the review can score the font, the
+            # transitions and the music against what this video needed -
+            # not just against what came out of ffmpeg.
+            decisions=self.decisions,
+            directive=self._ensure_directive(),
+            transitions=transition_planner.from_json(self.run.transitions_json),
         )
 
     def phase_review(self) -> None:
@@ -1535,6 +2027,19 @@ class Pipeline:
                 target_seconds=self._target_seconds(),
                 scene_seconds_max=self.strategy.scene_seconds_max,
             )
+            # Transition findings act on the plan rather than on the
+            # scenes, so they are applied here where the plan lives.
+            for finding in review.findings:
+                if finding.fix != "reduce_transitions" or not finding.fix_value:
+                    continue
+                plan = transition_planner.from_json(self.run.transitions_json)
+                if plan is None:
+                    continue
+                plan, note = refinement.reduce_transitions(plan, int(finding.fix_value))
+                if note:
+                    self.run.transitions_json = transition_planner.to_json(plan)
+                    self.db.commit()
+                    changes.append(note)
             if not changes:
                 self.event(
                     "refine",
@@ -1560,10 +2065,7 @@ class Pipeline:
                     )
                     self._build_clip(self.scenes[i], i)
 
-            cues = assembly_service.compose_cues(
-                self.db, self.project.id, self.scenes, self._caption_budget()
-            )
-            assembly_service.write_srt(self.project.id, cues)
+            self._recompose_cues()
             if dirty:
                 assembly_service.assemble(self.db, self.project, self.scenes, self.bgm_asset)
                 self._sync_plan_times()
@@ -1634,9 +2136,51 @@ class Pipeline:
         self._render_once(phase_id="render", message="initial render")
         self._finish_phase("render", "MP4の書き出しが完了しました")
 
+    def _record_style_memory(self) -> None:
+        """Files this production into the Style Memory (requirement 16).
+
+        Only what Kairo *chose* is recorded here, and only as variety data:
+        the font ranking reads it so the next video does not land on the
+        same face. What the user changed by hand is a different thing
+        entirely and is recorded where they change it, because conflating
+        the two would have the agent reinforcing its own habits and calling
+        them the user's preferences.
+
+        Never fails a finished production: a memory that cannot be written
+        is a lost convenience, not a lost video.
+        """
+        try:
+            directive = self._ensure_directive()
+            plan = transition_planner.from_json(self.run.transitions_json)
+            font = self.decisions.font if self.decisions else None
+            music = self.decisions.music if self.decisions else None
+            subtitle = self.decisions.subtitle if self.decisions else None
+            style_memory.record_production(
+                font_family=(font.family or font.name) if font and font.found else "",
+                music_name=(music.name if music and music.found else ""),
+                color_grade=directive.color.id,
+                edit_style=directive.style,
+                subtitle_size=(subtitle.size if subtitle else None),
+                subtitle_position=(subtitle.position if subtitle else ""),
+                transition_ratio=(
+                    round(plan.non_cut_count / max(1, plan.boundary_count), 3)
+                    if plan is not None
+                    else None
+                ),
+                title=self.strategy.title,
+                score=(
+                    self.review.overall_score
+                    if self.review and self.review.performed
+                    else None
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not record style memory for run %s", self.run_id)
+
     def phase_done(self) -> None:
         duration = sum(s.estimated_duration for s in self.scenes) if self.scenes else 0.0
         self._write_production_record(duration)
+        self._record_style_memory()
         score = self.review.overall_score if self.review and self.review.performed else None
         self.event(
             "done",
@@ -1774,6 +2318,10 @@ class Pipeline:
             use_narration=self.has_narration,
             voice_id=self.settings.tts.selected_voice,
             is_last=(index == len(self.scenes) - 1),
+            # Photo motion comes from the directive plus the picture's own
+            # subject position, so a still is moved in a way that suits the
+            # style and does not walk its subject out of frame.
+            directive=self._ensure_directive(),
         )
 
     # --------------------------------------------------------------- run
@@ -1784,6 +2332,7 @@ class Pipeline:
         ("material_analysis", "phase_material_analysis"),
         ("research", "phase_research"),
         ("trends", "phase_trends"),
+        ("direction", "phase_direction"),
         ("strategy", "phase_strategy"),
         ("planning", "phase_planning"),
         ("script", "phase_script"),

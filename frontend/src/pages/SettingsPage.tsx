@@ -5,6 +5,7 @@ import AIErrorPanel from "../components/AIErrorPanel";
 import SystemInfoPanel from "../components/SystemInfoPanel";
 import TrendSettingsTab from "../components/settings/TrendSettingsTab";
 import LibraryTab from "../components/settings/LibraryTab";
+import StyleMemoryTab from "../components/settings/StyleMemoryTab";
 import ConnectedServicesTab from "../components/settings/ConnectedServicesTab";
 import type {
   AppSettings,
@@ -31,6 +32,7 @@ type Tab =
   | "generation"
   | "trends"
   | "library"
+  | "memory"
   | "services"
   | "general";
 
@@ -43,6 +45,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "generation", label: "生成" },
   { id: "trends", label: "トレンド" },
   { id: "library", label: "素材ライブラリ" },
+  { id: "memory", label: "好みの記録" },
   { id: "services", label: "接続サービス" },
   { id: "general", label: "一般 / ストレージ" },
 ];
@@ -704,6 +707,8 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
           {tab === "library" && settings && (
             <LibraryTab settings={settings.library} applyPatch={applyPatch} />
           )}
+
+          {tab === "memory" && <StyleMemoryTab />}
 
           {tab === "services" && settings && (
             <ConnectedServicesTab

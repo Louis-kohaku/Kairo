@@ -3,7 +3,9 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Float, ForeignKey, Integer, String
+from typing import Optional
+
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -29,5 +31,11 @@ class SubtitleCue(Base):
     start: Mapped[float] = mapped_column(Float)
     end: Mapped[float] = mapped_column(Float)
     text: Mapped[str] = mapped_column(String, default="")
+    # This caption's own design, when the agent gave it one
+    # (schemas/edit_style.CueDesign, serialised). NULL means "use the
+    # project-wide subtitle style", which is how every cue behaved before
+    # per-caption design existed and is still what a Whisper transcript or
+    # a hand-typed cue gets.
+    design_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     project: Mapped["Project"] = relationship(back_populates="subtitle_cues")

@@ -60,6 +60,21 @@ DARK_PENALTY = 1.5
 # (leftover placement), but the plan says so rather than claiming a match.
 MATCH_THRESHOLD = TAG_SCORE
 
+# --- measured quality (requirement 7) ---------------------------------
+# Deliberately smaller than TAG_SCORE. Being about the right subject is
+# what makes a shot usable at all; being sharp is what breaks a tie. A
+# blur penalty that outweighed a subject match would fill a beach scene
+# with a crisp photo of a car park.
+#
+# The thresholds are calibrated against measurements in
+# frame_quality.sharpness: a well-focused photo lands near 0.55, a 3px
+# Gaussian blur near 0.22, and a 5px blur near 0.13.
+BLUR_THRESHOLD = 0.16
+BLUR_PENALTY = 2.5
+SHAKE_THRESHOLD = 0.5
+SHAKE_PENALTY = 2.0
+DUPLICATE_PENALTY = 2.5
+
 # Tags that describe how a picture looks rather than what is in it. They
 # are useful to display and useless for matching a subject, so they never
 # earn a match score.
@@ -107,7 +122,53 @@ def _score(
         score += ORIENTATION_BONUS
     if analysis.brightness is not None and analysis.brightness < material_analysis.DARK_THRESHOLD:
         score -= DARK_PENALTY
+
+    # --- measured quality (requirement 7) -----------------------------
+    # Subject relevance above decides *whether* a piece of material is
+    # about this scene; these decide whether it is worth showing. They are
+    # additive rather than a filter, because a slightly soft photo of
+    # exactly the right thing still beats a razor-sharp photo of something
+    # else - which is the judgement a human editor makes.
+    if analysis.quality_score is not None:
+        # -12 at a quality of 0, +8 at 100.
+        score += (analysis.quality_score - 60.0) * 0.2
+    if analysis.sharpness is not None and analysis.sharpness < BLUR_THRESHOLD:
+        score -= BLUR_PENALTY
+    if analysis.shake is not None and analysis.shake > SHAKE_THRESHOLD:
+        score -= SHAKE_PENALTY
+    if analysis.duplicate_of:
+        # The first copy of a shot keeps its score; the later ones are
+        # pushed down so a burst of five near-identical photos does not
+        # fill five scenes with the same picture.
+        score -= DUPLICATE_PENALTY
     return score, matched
+
+
+def quality_caveats(analysis: MaterialAnalysis) -> list[str]:
+    """What is technically wrong with this material, in the user's words.
+
+    Reported next to the assignment rather than mixed into the matched
+    tags: "ピンボケ" is not something a scene asked for, and listing it
+    as a match made the plan claim the opposite of what it meant.
+    """
+    notes: list[str] = []
+    if analysis.sharpness is not None and analysis.sharpness < BLUR_THRESHOLD:
+        notes.append("ピントが甘い素材です")
+    if analysis.shake is not None and analysis.shake > SHAKE_THRESHOLD:
+        notes.append("手ブレが大きい素材です")
+    if analysis.brightness is not None and analysis.brightness < 0.14:
+        notes.append("とても暗い素材です")
+    if analysis.duplicate_of:
+        notes.append("他の素材とほぼ同じ画です")
+    return notes
+
+
+# Material below this technical quality is not placed just to use it up.
+# The user uploaded it, so it is still offered when it actually matches a
+# scene's subject - but filling an empty beat with an out-of-focus frame
+# makes the video worse than a generated background would, which is the
+# one case requirement 7's "user material first" rule should not win.
+LEFTOVER_QUALITY_FLOOR = 40.0
 
 
 def _usable_slice(analysis: MaterialAnalysis, duration: float) -> tuple[float | None, float | None]:
@@ -344,11 +405,41 @@ def build_plan(
     # Videos first among the leftovers: they are above photos in the
     # priority order, and this is the one pass where subject relevance is
     # not deciding the outcome, so the stated order is the tie-break.
-    leftovers = [
-        asset.id
-        for asset, _ in sorted(pairs, key=lambda pair: 0 if pair[0].kind == "video" else 1)
-        if asset.id not in used_assets
-    ]
+    # Ordered by kind (videos first, per the priority order) and then by
+    # measured quality, so the leftover that gets a beat is the best of
+    # them rather than whichever was uploaded first. Material below the
+    # floor is left out entirely: showing an out-of-focus frame to avoid a
+    # generated background is not honouring the user's material, it is
+    # putting a bad shot in their video.
+    def _leftover_rank(pair):
+        asset, analysis = pair
+        quality = analysis.quality_score if analysis.quality_score is not None else 60.0
+        return (0 if asset.kind == "video" else 1, -quality)
+
+    leftovers = []
+    skipped_for_quality: list[str] = []
+    for asset, analysis in sorted(pairs, key=_leftover_rank):
+        if asset.id in used_assets:
+            continue
+        quality = analysis.quality_score
+        # Two separate gates, because they catch different things. The
+        # overall score catches a shot that is bad in several small ways;
+        # the sharpness threshold catches one that is simply out of focus,
+        # which can still score acceptably if it is bright and steady. A
+        # blurred frame used purely to fill a beat is worse than the
+        # generated background it displaced.
+        blurred = (
+            analysis.sharpness is not None and analysis.sharpness < BLUR_THRESHOLD
+        )
+        if (quality is not None and quality < LEFTOVER_QUALITY_FLOOR) or blurred:
+            skipped_for_quality.append(asset.original_filename)
+            continue
+        leftovers.append(asset.id)
+    if skipped_for_quality:
+        plan.notes.append(
+            "画質が低いため使わなかった素材: "
+            + "、".join(skipped_for_quality[:5])
+        )
     if leftovers:
         for i in range(len(scenes)):
             if i in assigned_scene or not leftovers:
@@ -394,6 +485,9 @@ def build_plan(
                 reason = f"「{'・'.join(matched[:3])}」が一致しました"
             else:
                 reason = "ユーザー素材を優先して使用します（内容の一致は確認できていません）"
+            caveats = quality_caveats(analysis)
+            if caveats:
+                reason += "（" + "、".join(caveats) + "）"
             plan.assignments.append(
                 MaterialAssignment(
                     scene_index=i,

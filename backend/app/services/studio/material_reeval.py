@@ -34,12 +34,14 @@ from app.models.project import Project
 from app.services import ai_diagnostics, render_service, settings_service
 from app.services.studio import (
     assembly_service,
+    edit_director,
     events,
     material_analysis,
     material_plan,
     material_service,
     planning_service,
     run_service,
+    transition_planner,
 )
 
 logger = logging.getLogger(__name__)
@@ -200,7 +202,23 @@ def run_reevaluate(
             db.add(render_job)
             db.commit()
             db.refresh(render_job)
-            render_service.run_render(project_id, render_job.id, settings.subtitle.enabled, crf)
+            # The run's own edit decisions have to come along, or a
+            # re-render after adding a photo quietly returns an ungraded
+            # video with none of its transitions - the user would see the
+            # look change for a reason that has nothing to do with what
+            # they did.
+            directive = edit_director.from_json(run.direction_json) if run else None
+            render_service.run_render(
+                project_id,
+                render_job.id,
+                settings.subtitle.enabled,
+                crf,
+                transitions=(
+                    transition_planner.from_json(run.transitions_json) if run else None
+                ),
+                color=(directive.color if directive else None),
+                audio=(directive.audio if directive else None),
+            )
             db.expire_all()
             finished = db.get(Job, render_job.id)
             if finished is None or finished.status != "completed":

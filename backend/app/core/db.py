@@ -91,6 +91,13 @@ _NEW_COLUMNS = {
         ("analysis_status", "TEXT"),
         ("analysis_json", "TEXT"),
         ("analysis_error", "TEXT"),
+        # Measured material quality (services/studio/material_analysis.py),
+        # kept as columns rather than only inside analysis_json so the
+        # selection stage can rank and sort without decoding every blob.
+        ("quality_score", "REAL"),
+        ("sharpness", "REAL"),
+        ("shake", "REAL"),
+        ("signature", "TEXT"),
     ],
     "production_runs": [
         ("material_mode", "TEXT"),
@@ -108,6 +115,33 @@ _NEW_COLUMNS = {
         ("variants_json", "TEXT"),
         ("iteration", "INTEGER"),
         ("best_score", "REAL"),
+        # AI編集ディレクター: the directive the run is cut to, the per-boundary
+        # transition plan, the per-caption design, and the delivery target.
+        # All nullable, so runs made before the director existed still load
+        # and simply report "編集方針の記録がありません".
+        ("direction_json", "TEXT"),
+        ("transitions_json", "TEXT"),
+        ("subtitle_design_json", "TEXT"),
+        ("platform", "TEXT"),
+        ("edit_style", "TEXT"),
+    ],
+    # Per-cue caption design (schemas/edit_style.CueDesign). NULL means "use
+    # the project-wide style", which is exactly how every cue behaved before
+    # this column existed.
+    "subtitle_cues": [("design_json", "TEXT")],
+    # Font Intelligence impression axes. Zero until the next font scan
+    # fills them in, and `font_profile.needs_profiling` is what tells the
+    # library screen (and the production pipeline) to run that scan rather
+    # than ranking every face at zero.
+    "library_assets": [
+        ("luxury", "INTEGER"),
+        ("casual", "INTEGER"),
+        ("cinematic", "INTEGER"),
+        ("impact", "INTEGER"),
+        ("friendliness", "INTEGER"),
+        ("authority", "INTEGER"),
+        ("use_cases_json", "TEXT"),
+        ("classification", "TEXT"),
     ],
 }
 
@@ -134,6 +168,11 @@ _BACKFILL = (
     "UPDATE scenes SET material_origin = '' WHERE material_origin IS NULL",
     "UPDATE scenes SET material_note = '' WHERE material_note IS NULL",
     "UPDATE production_runs SET iteration = 0 WHERE iteration IS NULL",
+    # A run made before the director existed has no delivery target on
+    # record. "generic" is the honest value: it means "nothing was chosen",
+    # which is exactly what happened, and the directive panel says so.
+    "UPDATE production_runs SET platform = 'generic' WHERE platform IS NULL",
+    "UPDATE production_runs SET edit_style = '' WHERE edit_style IS NULL",
 )
 
 

@@ -75,9 +75,18 @@ def list_voices() -> list[TTSVoice]:
     ]
 
 
-def synthesize_to_wav(text: str, voice_id: str | None, dest_path: Path) -> None:
+def synthesize_to_wav(
+    text: str, voice_id: str | None, dest_path: Path, rate: int = 0
+) -> None:
     """Synthesizes `text` with the given voice id (or the system default
-    voice when None) and writes a .wav file to `dest_path`."""
+    voice when None) and writes a .wav file to `dest_path`.
+
+    `rate` is the SAPI speaking rate, -10 (slowest) to 10 (fastest). It is
+    how the edit director's narration delivery reaches the actual audio: a
+    documentary is spoken slower than an entertainment short, and without
+    this the setting would be a number in a panel with nothing behind it.
+    0 is the voice's own default and is what every existing caller gets.
+    """
     if not is_supported_platform():
         raise TTSError("このOSではTTS(音声合成)に対応していません(Windowsのみ対応)。")
     if not text.strip():
@@ -91,6 +100,9 @@ def synthesize_to_wav(text: str, voice_id: str | None, dest_path: Path) -> None:
         args = ["-File", str(_SYNTHESIZE_SCRIPT), "-TextFile", str(text_file), "-OutFile", str(dest_path)]
         if voice_id:
             args.extend(["-VoiceId", voice_id])
+        rate = max(-10, min(10, int(rate)))
+        if rate:
+            args.extend(["-Rate", str(rate)])
 
         result = _run_powershell(args, timeout=60.0)
         if result.returncode != 0 or not dest_path.exists():

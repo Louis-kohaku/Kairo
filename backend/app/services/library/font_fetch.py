@@ -120,6 +120,96 @@ CATALOG: tuple[CatalogEntry, ...] = (
 )
 CATALOG_BY_ID: dict[str, CatalogEntry] = {e.id: e for e in CATALOG}
 
+# The families worth installing before the first production, and the edit
+# style each one exists to serve.
+#
+# The reason this set exists: a Windows machine's own Japanese fonts are all
+# document faces - BIZ UD, MS Gothic, Yu Gothic, Meiryo, HG series. They are
+# legible and they are interchangeable, so a library made only of them gives
+# the ranking nothing to choose *between*, and captions on a travel short
+# end up looking like captions in a spreadsheet. Nine OFL families cover the
+# registers the OS has none of: a display face for hooks, a rounded face for
+# casual subjects, two Mincho weights for cinematic and luxury, and a
+# neutral modern gothic that beats the OS's for short-form.
+#
+# Every one is SIL Open Font License 1.1 - free, commercial use permitted,
+# no attribution required in the video - and each is downloaded with its own
+# OFL.txt, exactly like any other catalogue entry.
+RECOMMENDED_STARTER: tuple[tuple[str, str], ...] = (
+    ("zenkakugothicnew", "汎用の角ゴシック。Shorts・Travelの標準字幕に"),
+    ("mplus1p", "軽やかなゴシック。Vlog・日常系に"),
+    ("zenmarugothic", "丸ゴシック。Casual・Food・ペットに"),
+    ("delagothicone", "極太の見出し。Hookとエンタメのテロップに"),
+    ("rocknrollone", "太めでポップ。Entertainment向け"),
+    ("shipporimincho", "和の明朝。Cinematic・Documentaryに"),
+    ("zenoldmincho", "重厚な明朝。Luxury・歴史もの向け"),
+    ("notoserifjp", "汎用明朝。上品な字幕に"),
+    ("yuseimagic", "手書き風。カジュアルなテロップに"),
+)
+
+
+def starter_set(db=None) -> dict:
+    """The recommended set, and how much of it is already installed.
+
+    Reported rather than installed automatically: downloading is a network
+    action that writes files, and `settings.library.auto_download_fonts`
+    exists precisely so the user decides. What Kairo does without
+    permission is *say* that its font choices are limited and name the fix.
+    """
+    installed: set[str] = set()
+    if db is not None:
+        from app.models.library import LibraryAsset
+
+        rows = (
+            db.query(LibraryAsset)
+            .filter(LibraryAsset.kind == "font", LibraryAsset.is_system.is_(False))
+            .all()
+        )
+        installed = {r.family for r in rows if r.available}
+
+    items = []
+    for entry_id, purpose in RECOMMENDED_STARTER:
+        entry = CATALOG_BY_ID[entry_id]
+        items.append(
+            {
+                "id": entry.id,
+                "family": entry.family,
+                "purpose": purpose,
+                "installed": entry.family in installed,
+                "license_id": _LICENSE_BY_DIR[entry.license_dir][0],
+                "variable_only": entry.variable_only,
+            }
+        )
+    missing = [i for i in items if not i["installed"]]
+    return {
+        "items": items,
+        "installed_count": len(items) - len(missing),
+        "total": len(items),
+        "missing_ids": [i["id"] for i in missing],
+        "license": "SIL Open Font License 1.1（商用利用可・表記義務なし）",
+        "source": "Google Fonts (google/fonts リポジトリ)",
+    }
+
+
+def install_starter_set(*, max_files: int = 3) -> dict:
+    """Downloads whatever of the recommended set is missing.
+
+    One family failing does not stop the rest: a partial improvement to the
+    library is a real improvement, and the result says exactly which
+    families arrived and which did not.
+    """
+    installed: list[dict] = []
+    failed: list[dict] = []
+    for entry_id, _purpose in RECOMMENDED_STARTER:
+        try:
+            installed.append(download(entry_id, max_files=max_files))
+        except FontFetchError as exc:
+            failed.append({"id": entry_id, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal
+            logger.exception("Starter font download failed: %s", entry_id)
+            failed.append({"id": entry_id, "error": f"{type(exc).__name__}: {exc}"})
+    return {"installed": installed, "failed": failed}
+
 
 def _get(url: str, *, stream: bool = False) -> requests.Response:
     try:

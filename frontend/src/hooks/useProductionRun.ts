@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { Phase, ProductionEvent, ProductionRun } from "../types";
+import type { MaterialMode, Phase, ProductionEvent, ProductionRun } from "../types";
 
 /**
  * Tracks one production run: its status and its event stream.
@@ -117,6 +117,11 @@ export function useProductionRun(projectId: string) {
       targetDurationSeconds: number;
       orientation: string;
       mode?: "full_auto" | "co_creation";
+      materialMode?: MaterialMode;
+      selectedAssetIds?: string[];
+      // Empty = the edit director decides.
+      platform?: string;
+      editStyle?: string;
     }) => {
       setError(null);
       try {

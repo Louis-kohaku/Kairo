@@ -19,6 +19,14 @@ AXES: tuple[str, ...] = (
     "pacing",
     "visual",
     "subtitle",
+    # The craft decisions the edit director made, scored against what the
+    # finished file actually contains. Added because the brief asks the
+    # reviewer to be able to say "フォントが映像に合っていない" and
+    # "Transitionが多すぎる" - neither of which any of the axes above can
+    # express, since both are about a choice rather than about a measurement.
+    "font",
+    "transition",
+    "music",
     "audio",
     "story",
     "trend_alignment",
@@ -29,6 +37,9 @@ AXIS_LABELS: dict[str, str] = {
     "pacing": "テンポ",
     "visual": "映像",
     "subtitle": "字幕",
+    "font": "フォント",
+    "transition": "画面切り替え",
+    "music": "音楽",
     "audio": "音",
     "story": "構成",
     "trend_alignment": "トレンド適合",

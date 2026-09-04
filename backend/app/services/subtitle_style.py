@@ -190,13 +190,67 @@ def _ass_text(text: str) -> str:
     return cleaned.replace("\n", r"\N").strip()
 
 
+_ANIMATION_TAGS: dict[str, str] = {
+    # ASS transform tags, prepended to a line. `\fad` is a fade in/out in
+    # milliseconds; `\t` animates a property over a window. Each is a real
+    # libass feature - nothing here needs a filter or a second render pass.
+    "none": "",
+    "fade": r"{\fad(160,120)}",
+    # Scales up from 80% over the first 140ms, which reads as a pop without
+    # the text ever being clipped by the frame.
+    "pop": r"{\fad(80,100)\fscx80\fscy80\t(0,140,\fscx100\fscy100)}",
+    # Rises 40px into place while fading in.
+    "slide_up": r"{\fad(160,120)\move(0,40,0,0)}",
+}
+
+
+def _emphasis_markup(text: str, words: list[str], scale: float) -> str:
+    """Sets the emphasised words larger and bolder inside the line.
+
+    This is what makes the captions kinetic typography rather than a block
+    of text at one size: ASS inline overrides change the size mid-line, so
+    the word carrying the beat is genuinely bigger than the words around
+    it (requirement 4).
+
+    Longest word first, so an emphasis on "10" does not break an emphasis
+    on "100". A word already inside an override block is skipped, because
+    nesting the tags would produce text libass renders literally.
+    """
+    if not words or scale <= 1.01:
+        return text
+    percent = int(max(105, min(200, round(scale * 100))))
+    out = text
+    for word in sorted({w for w in words if w}, key=len, reverse=True):
+        if not word or word not in out:
+            continue
+        # Only the first occurrence: emphasising every instance of a common
+        # word turns the whole line back into one size.
+        marked = (
+            "{" + f"\\fscx{percent}\\fscy{percent}\\b1" + "}"
+            + word
+            + "{" + "\\fscx100\\fscy100\\b0" + "}"
+        )
+        out = out.replace(word, marked, 1)
+    return out
+
+
 def build_ass(
-    cues: list[SubtitleCue], settings: SubtitleSettings, width: int, height: int
+    cues: list[SubtitleCue],
+    settings: SubtitleSettings,
+    width: int,
+    height: int,
+    designs: dict | None = None,
 ) -> str:
     """A complete ASS subtitle script sized to this exact frame.
 
     `PlayResX`/`PlayResY` are the real video dimensions, so every measure
     below (font size, outline width, margins) is in output pixels.
+
+    `designs` maps a cue's index to its `CueDesign` (see
+    services/studio/subtitle_design.py). A cue with no design is rendered
+    in the project-wide style, exactly as every cue was before per-caption
+    design existed - which is what a Whisper transcript or a hand-typed cue
+    still gets.
     """
     size = resolve_size_px(settings, height)
     alignment = _ALIGNMENT_BY_POSITION.get(settings.position, 2)
@@ -246,11 +300,58 @@ def build_ass(
 
     budget = max_chars_per_line(settings, width, height)
     lines = [header]
-    for cue in cues:
-        text = _ass_text(wrap_for_burn(cue.text, budget))
+    designs = designs or {}
+    for index, cue in enumerate(cues):
+        design = designs.get(index)
+        # Per-caption overrides are prefixes on the line. libass applies
+        # them on top of the Kairo style, so a cue with no design produces
+        # a byte-identical line to the one this function has always emitted.
+        prefix = ""
+        cue_budget = budget
+        text_source = cue.text
+        if design is not None:
+            overrides: list[str] = []
+            scale = float(getattr(design, "size_scale", 1.0) or 1.0)
+            if abs(scale - 1.0) > 0.02:
+                cue_size = max(12, min(int(round(size * scale)), int(height * 0.16)))
+                overrides.append(f"\\fs{cue_size}")
+                # A bigger caption fits fewer characters per line, so the
+                # wrap budget has to follow it or the line runs off frame.
+                cue_budget = max(4, int(budget / max(0.5, scale)))
+            spacing = float(getattr(design, "letter_spacing", 0.0) or 0.0)
+            if abs(spacing) > 0.05:
+                overrides.append(f"\\fsp{spacing:.1f}")
+            if getattr(design, "bold", False):
+                overrides.append("\\b1")
+            position = getattr(design, "position", "") or settings.position
+            if position != settings.position:
+                overrides.append(f"\\an{_ALIGNMENT_BY_POSITION.get(position, 2)}")
+            if overrides:
+                prefix = "{" + "".join(overrides) + "}"
+            animation = getattr(design, "animation", "none") or "none"
+            # "pop" animates the whole line's scale, and per-word emphasis
+            # sets the scale inline. Running both leaves libass
+            # interpolating a property the line also sets mid-way through,
+            # so the emphasised words flicker for the first frames. Emphasis
+            # is the more meaningful of the two, so the entrance falls back
+            # to a fade.
+            if animation == "pop" and getattr(design, "emphasis", None):
+                animation = "fade"
+            prefix = _ANIMATION_TAGS.get(animation, "") + prefix
+
+        text = _ass_text(wrap_for_burn(text_source, cue_budget))
         if not text:
             continue
+        if design is not None and getattr(design, "emphasis", None):
+            # Applied after wrapping, so an emphasised word split across a
+            # line break is left alone rather than half-marked.
+            emphasis_scale = 1.0
+            for line in text.split(r"\N"):
+                if any(w in line for w in design.emphasis):
+                    emphasis_scale = 1.22
+                    break
+            text = _emphasis_markup(text, list(design.emphasis), emphasis_scale)
         lines.append(
-            f"Dialogue: 0,{_ass_time(cue.start)},{_ass_time(cue.end)},Kairo,,0,0,0,,{text}"
+            f"Dialogue: 0,{_ass_time(cue.start)},{_ass_time(cue.end)},Kairo,,0,0,0,,{prefix}{text}"
         )
     return "\n".join(lines) + "\n"

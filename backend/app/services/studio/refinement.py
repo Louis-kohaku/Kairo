@@ -38,6 +38,48 @@ def _shorten(text: str, limit: int) -> str:
     return text[:limit].strip()
 
 
+def reduce_transitions(plan, keep: int) -> tuple[object, str]:
+    """Thins a transition plan down to its `keep` best-justified boundaries.
+
+    The review's "Transitionが多すぎる" finding is only worth reporting if
+    something can act on it, and the thing that can act on it is the plan -
+    the renderer executes exactly what the plan says. Dropped in order of
+    how weak the reason was, so an act change keeps its transition and an
+    incidental location change loses one.
+
+    Returns (plan, description). The plan is a new object; the caller
+    stores it, which is what makes the next render actually different.
+    """
+    from app.schemas.edit_style import TRANSITION_LABELS, TRANSITION_REASON_LABELS
+    from app.services.studio.transition_planner import _REASON_PRIORITY
+
+    non_cut = [c for c in plan.choices if c.transition != "cut"]
+    if len(non_cut) <= max(0, keep):
+        return plan, ""
+
+    ranked = sorted(
+        non_cut, key=lambda c: (-_REASON_PRIORITY.get(c.reason, 0), c.index)
+    )
+    survivors = {c.index for c in ranked[: max(0, keep)]}
+    removed = 0
+    for choice in plan.choices:
+        if choice.transition == "cut" or choice.index in survivors:
+            continue
+        choice.transition = "cut"
+        choice.label = TRANSITION_LABELS["cut"]
+        choice.duration = 0.0
+        choice.reason = "none"
+        choice.reason_label = TRANSITION_REASON_LABELS["none"]
+        choice.detail = "切り替えが多すぎたため、カットに戻しました"
+        removed += 1
+    plan.non_cut_count = len(non_cut) - removed
+    plan.summary = (
+        f"{plan.boundary_count}箇所のうち{plan.non_cut_count}箇所だけ画面切り替えを使います"
+        f"（レビュー指摘により{removed}箇所をカットに戻しました）"
+    )
+    return plan, f"画面切り替えを{len(non_cut)}箇所 → {plan.non_cut_count}箇所に削減"
+
+
 def apply_findings(
     db,
     scenes: list,

@@ -79,6 +79,23 @@ class ProductionRun(Base):
     selected_asset_ids: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     material_plan_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # The edit directive this run is cut to (schemas/edit_style.EditDirective),
+    # produced by the 編集方針決定 phase before anything is written or encoded.
+    # Stored on the run so a resumed run edits to the same decisions the user
+    # was shown rather than quietly re-deciding, and so the finished video's
+    # report can say what the policy actually was.
+    direction_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Which transition sits at each scene boundary, and why
+    # (schemas/edit_style.TransitionPlan).
+    transitions_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Per-caption design decisions (schemas/edit_style.SubtitleDesignPlan).
+    subtitle_design_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Delivery target chosen for this run (services/studio/platform_presets.py).
+    platform: Mapped[str] = mapped_column(String, default="generic")
+    # An edit style the user pinned, overriding the genre default. Empty
+    # means "let the director choose".
+    edit_style: Mapped[str] = mapped_column(String, default="")
+
     research_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     strategy_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     quality_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

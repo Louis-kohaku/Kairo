@@ -67,6 +67,17 @@ class MediaAsset(Base):
     analysis_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     analysis_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Measured technical quality (services/studio/frame_quality.py). Also
+    # inside analysis_json, but kept as real columns so the selection stage
+    # can filter and sort on them without decoding a JSON blob per asset.
+    # NULL means "not measured", which is different from 0 and is never
+    # rendered as a number in the UI.
+    quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    sharpness: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    shake: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # 16x16 average hash, for finding duplicate material.
+    signature: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
     imported_at: Mapped[datetime] = mapped_column(default=_now)
 
     project: Mapped["Project"] = relationship(back_populates="media_assets")

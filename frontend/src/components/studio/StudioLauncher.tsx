@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { api } from "../../api/client";
-import type { MaterialMode, ModelPlan } from "../../types";
+import type {
+  EditStyleOption,
+  MaterialMode,
+  ModelPlan,
+  PlatformOption,
+} from "../../types";
 import { useMaterials } from "../../hooks/useMaterials";
 import MaterialPanel from "./MaterialPanel";
 import MaterialPlanPanel from "./MaterialPlanPanel";
@@ -59,6 +64,10 @@ export default function StudioLauncher({
     mode: "full_auto" | "co_creation";
     materialMode: MaterialMode;
     selectedAssetIds: string[];
+    // Empty means "let the edit director decide from the brief and the
+    // genre", which is the default and the recommended path.
+    platform: string;
+    editStyle: string;
   }) => void;
   busy?: boolean;
   error?: string | null;
@@ -68,6 +77,14 @@ export default function StudioLauncher({
   const [orientation, setOrientation] = useState("vertical");
   const [plan, setPlan] = useState<ModelPlan | null>(null);
   const [checking, setChecking] = useState(true);
+  // "" = let the edit director choose. Both pickers are deliberately
+  // optional: Full Auto's whole promise is that the user does not have to
+  // answer these, and an explicit choice is an override, not a required
+  // step.
+  const [platform, setPlatform] = useState("");
+  const [editStyle, setEditStyle] = useState("");
+  const [styles, setStyles] = useState<EditStyleOption[]>([]);
+  const [platforms, setPlatforms] = useState<PlatformOption[]>([]);
 
   const material = useMaterials(projectId, duration);
 
@@ -82,6 +99,21 @@ export default function StudioLauncher({
 
   useEffect(refreshPlan, []);
 
+  useEffect(() => {
+    api
+      .getEditStyles()
+      .then((r) => {
+        setStyles(r.styles);
+        setPlatforms(r.platforms.filter((p) => p.id !== "generic"));
+      })
+      .catch(() => {
+        // The pickers simply do not appear. Auto-detection still runs, so
+        // a production is never blocked by this failing.
+        setStyles([]);
+        setPlatforms([]);
+      });
+  }, []);
+
   const blocked = plan != null && plan.blocking.length > 0;
   const noSelection =
     material.mode === "selected" && material.selectedIds.length === 0;
@@ -95,6 +127,8 @@ export default function StudioLauncher({
       mode,
       materialMode: material.mode,
       selectedAssetIds: material.selectedIds,
+      platform,
+      editStyle,
     });
 
   return (
@@ -190,6 +224,68 @@ export default function StudioLauncher({
                 ))}
               </div>
             </div>
+
+            {platforms.length > 0 && (
+              <div className="launcher-option-group">
+                <span className="launcher-label">配信先</span>
+                <div className="launcher-chips">
+                  <button
+                    className={platform === "" ? "chip chip-on" : "chip"}
+                    onClick={() => setPlatform("")}
+                    disabled={busy}
+                    title="依頼文と画面の形かAIが判断します"
+                  >
+                    AIにおまかせ
+                  </button>
+                  {platforms.map((p) => (
+                    <button
+                      key={p.id}
+                      className={platform === p.id ? "chip chip-on" : "chip"}
+                      onClick={() => {
+                        setPlatform(p.id);
+                        setOrientation(p.orientation);
+                      }}
+                      disabled={busy}
+                      title={[`${p.ideal_seconds}秒前後が目安`, ...p.notes].join(" / ")}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {styles.length > 0 && (
+              <div className="launcher-option-group">
+                <span className="launcher-label">編集スタイル</span>
+                <div className="launcher-chips">
+                  <button
+                    className={editStyle === "" ? "chip chip-on" : "chip"}
+                    onClick={() => setEditStyle("")}
+                    disabled={busy}
+                    title="ジャンルと依頼文からAIが選びます"
+                  >
+                    AIにおまかせ
+                  </button>
+                  {styles.map((st) => (
+                    <button
+                      key={st.id}
+                      className={editStyle === st.id ? "chip chip-on" : "chip"}
+                      onClick={() => setEditStyle(st.id)}
+                      disabled={busy}
+                      title={st.description}
+                    >
+                      {st.label}
+                    </button>
+                  ))}
+                </div>
+                {editStyle !== "" && (
+                  <p className="launcher-hint">
+                    {styles.find((st) => st.id === editStyle)?.description}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </section>
 

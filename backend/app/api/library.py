@@ -163,6 +163,32 @@ def font_catalog(db: Session = Depends(get_db)):
     }
 
 
+@router.get("/fonts/starter-set")
+def font_starter_set(db: Session = Depends(get_db)):
+    """The recommended font set, and how much of it is installed.
+
+    Exists because the OS's own Japanese fonts are all document faces: with
+    only those, every video's captions look the same no matter what the
+    edit style asked for. This tells the user that plainly and names the
+    nine OFL families that fix it, rather than silently downloading them.
+    """
+    return font_fetch.starter_set(db)
+
+
+@router.post("/fonts/starter-set")
+def install_font_starter_set(db: Session = Depends(get_db)):
+    """Downloads the missing families in the recommended set."""
+    result = font_fetch.install_starter_set()
+    scan_result = fonts.scan(db, include_system=False)
+    if not result["installed"] and result["failed"]:
+        raise HTTPException(
+            502,
+            "推奨フォントを1つも取得できませんでした: "
+            + "; ".join(f"{f['id']}: {f['error']}" for f in result["failed"][:3]),
+        )
+    return {**result, "scan": scan_result, "starter_set": font_fetch.starter_set(db)}
+
+
 @router.post("/fonts/download")
 def download_font(payload: DownloadFontRequest, db: Session = Depends(get_db)):
     try:

@@ -90,6 +90,30 @@ class MaterialAnalysis(BaseModel):
     motion: Optional[float] = None
     dominant_colors: list[str] = Field(default_factory=list)
 
+    # --- measured quality (services/studio/frame_quality.py) -----------
+    # All optional: None means "not measured", which is different from 0
+    # and is never shown as a number in the UI. Together they are what
+    # lets the selection stage rank material instead of taking it in
+    # upload order (requirement 7).
+    #
+    # 0.0-1.0, higher is sharper. A blur proxy, not a focus verdict.
+    sharpness: Optional[float] = None
+    # 0.0-1.0, video only. The *variance* of frame-to-frame displacement,
+    # so a steady pan scores low and a hand-held shot scores high.
+    shake: Optional[float] = None
+    # 0-100 technical usability, from sharpness/brightness/shake.
+    quality_score: Optional[float] = None
+    quality_notes: list[str] = Field(default_factory=list)
+    # Where the picture's detail is, in 0..1 frame coordinates. Used to
+    # keep the subject in shot during a Ken Burns move (requirement 6).
+    # A detail centroid, not face detection - the UI says so.
+    subject_x: Optional[float] = None
+    subject_y: Optional[float] = None
+    # 16x16 average hash, for finding duplicate material.
+    signature: str = ""
+    # Asset ids this file appears to duplicate.
+    duplicate_of: list[str] = Field(default_factory=list)
+
     usable: UsableRange = Field(default_factory=UsableRange)
 
     # "vision_ai" | "metadata" | "metadata+filename". The UI shows this

@@ -21,6 +21,7 @@ import CoCreationChat from "../components/studio/CoCreationChat";
 import QualityPanel from "../components/studio/QualityPanel";
 import VideoReviewPanel from "../components/studio/VideoReviewPanel";
 import AgentDecisionsPanel from "../components/studio/AgentDecisionsPanel";
+import EditDirectivePanel from "../components/studio/EditDirectivePanel";
 import ResearchPanel from "../components/studio/ResearchPanel";
 import SceneBoard from "../components/studio/SceneBoard";
 import MaterialPanel from "../components/studio/MaterialPanel";
@@ -42,6 +43,7 @@ type Tab =
   | "scenes"
   | "quality"
   | "review"
+  | "direction"
   | "decisions"
   | "research";
 
@@ -51,6 +53,9 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "materials", label: "素材" },
   { id: "usage", label: "使用素材" },
   { id: "scenes", label: "シーン" },
+  // The policy the agent decided before editing. Placed before the plan
+  // reviews because it is what explains them.
+  { id: "direction", label: "編集方針" },
   { id: "quality", label: "品質" },
   // The rendered file's own score, kept apart from "品質" (which reviews the
   // plan) because the two genuinely can disagree.
@@ -167,6 +172,8 @@ export default function Studio({
     mode: "full_auto" | "co_creation";
     materialMode: MaterialMode;
     selectedAssetIds: string[];
+    platform: string;
+    editStyle: string;
   }) => {
     setStarting(true);
     try {
@@ -525,6 +532,15 @@ export default function Studio({
                     }
                   : undefined
               }
+            />
+          )}
+
+          {tab === "direction" && (
+            <EditDirectivePanel
+              directive={run?.direction ?? null}
+              transitions={run?.transitions ?? null}
+              subtitleDesign={run?.subtitle_design ?? null}
+              assets={run?.assets ?? null}
             />
           )}
 

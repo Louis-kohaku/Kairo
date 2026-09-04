@@ -24,7 +24,18 @@ from app.services.ffmpeg.engine import _run
 
 
 def _zoompan_expression(
-    zoom_start: float, zoom_end: float, pan: str, frames: int, width: int, height: int, fps: float
+    zoom_start: float,
+    zoom_end: float,
+    pan: str,
+    frames: int,
+    width: int,
+    height: int,
+    fps: float,
+    *,
+    x_start: float | None = None,
+    y_start: float | None = None,
+    x_end: float | None = None,
+    y_end: float | None = None,
 ) -> str:
     """Ken Burns move for a still image.
 
@@ -33,23 +44,42 @@ def _zoompan_expression(
     target before this runs: zoompan samples from the *input* frame, and
     zooming into an image that is already at output size is what makes the
     effect look like a reel of JPEG artefacts.
+
+    The four anchor arguments are the window *centre*, in 0..1 of the
+    frame, at the start and end of the move. They come from
+    `studio/photo_motion.plan_move`, which has already clamped them so the
+    subject stays in shot and the window stays inside the picture - all the
+    reasoning lives there, and this function only interpolates. When they
+    are omitted the old `pan` behaviour is used unchanged, so any caller
+    that has no subject information behaves exactly as before.
     """
     frames = max(2, frames)
     span = zoom_end - zoom_start
     zoom_expr = f"{zoom_start:.4f}+({span:.4f}*on/{frames})"
 
-    if pan == "left":
+    if x_start is not None and x_end is not None:
+        cx = f"({x_start:.4f}+({x_end - x_start:.4f}*on/{frames}))"
+        x_expr = f"iw*{cx}-(iw/zoom*0.5)"
+    elif pan == "left":
         x_expr = f"iw*0.5-(iw/zoom*0.5)-(iw*0.06*on/{frames})"
-        y_expr = "ih*0.5-(ih/zoom*0.5)"
     elif pan == "right":
         x_expr = f"iw*0.5-(iw/zoom*0.5)+(iw*0.06*on/{frames})"
-        y_expr = "ih*0.5-(ih/zoom*0.5)"
-    elif pan == "up":
-        x_expr = "iw*0.5-(iw/zoom*0.5)"
-        y_expr = f"ih*0.5-(ih/zoom*0.5)-(ih*0.06*on/{frames})"
     else:
         x_expr = "iw*0.5-(iw/zoom*0.5)"
+
+    if y_start is not None and y_end is not None:
+        cy = f"({y_start:.4f}+({y_end - y_start:.4f}*on/{frames}))"
+        y_expr = f"ih*{cy}-(ih/zoom*0.5)"
+    elif pan == "up":
+        y_expr = f"ih*0.5-(ih/zoom*0.5)-(ih*0.06*on/{frames})"
+    else:
         y_expr = "ih*0.5-(ih/zoom*0.5)"
+
+    # A final guard inside the expression as well as in the planner: the
+    # window must never run off the source, or zoompan repeats the edge
+    # pixel and the shot ends on a smear.
+    x_expr = f"max(0,min(iw-iw/zoom,{x_expr}))"
+    y_expr = f"max(0,min(ih-ih/zoom,{y_expr}))"
 
     return (
         f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}'"
@@ -73,6 +103,10 @@ def still_to_clip(
     crf: int = 20,
     fade_in: float = 0.0,
     fade_out: float = 0.0,
+    x_start: float | None = None,
+    y_start: float | None = None,
+    x_end: float | None = None,
+    y_end: float | None = None,
 ) -> None:
     """Renders one still image into a moving clip of exactly `duration`.
 
@@ -87,7 +121,19 @@ def still_to_clip(
         f"scale={width * 2}:{height * 2}:force_original_aspect_ratio=increase,"
         f"crop={width * 2}:{height * 2}"
     )
-    zoompan = _zoompan_expression(zoom_start, zoom_end, pan, frames, width, height, fps)
+    zoompan = _zoompan_expression(
+        zoom_start,
+        zoom_end,
+        pan,
+        frames,
+        width,
+        height,
+        fps,
+        x_start=x_start,
+        y_start=y_start,
+        x_end=x_end,
+        y_end=y_end,
+    )
 
     # Fades are opt-in per edge, and default to none. Clips are
     # concatenated back to back, so a fade-out on one clip followed by a
@@ -96,6 +142,11 @@ def still_to_clip(
     # Short-form wants hard cuts; only the very end of the video fades.
     fade_in = max(0.0, min(fade_in, duration / 3))
     fade_out = max(0.0, min(fade_out, duration / 3))
+    # Note on colour: scene clips are deliberately built *ungraded*. Every
+    # clip goes onto the timeline and through engine.normalize_segment on
+    # its way into the render, and that is where the video's colour look is
+    # applied - once, to every shot, including imported footage. Grading
+    # here as well would apply it twice to exactly the clips Kairo made.
     video_chain = f"{prescale},{zoompan},format=yuv420p"
     if fade_in > 0:
         video_chain += f",fade=t=in:st=0:d={fade_in:.3f}"
@@ -155,6 +206,8 @@ def video_to_clip(
     crf: int = 20,
     source_start: float = 0.0,
     fill: str = "pad",
+    ambience: float = 0.0,
+    denoise: bool = False,
 ) -> None:
     """Fits existing footage (the user's own, or an AI-generated clip) into
     a scene slot: scaled into frame, looped when it is shorter than the
@@ -168,6 +221,17 @@ def video_to_clip(
     cropping ("cover"). Cover is what a 16:9 holiday video needs to become
     a 9:16 short without two black bars taking half the screen; pad stays
     available for material where losing the edges would lose the subject.
+
+    `ambience` is requirement 11's 環境音の保持, as a gain on the footage's
+    own audio. It was previously discarded outright: a clip of waves became
+    a silent clip of waves, and the only sound in the finished video was
+    synthesised. With it, the sea is still there under the music. When
+    narration is also present the ambience is mixed well below it, because
+    the point is atmosphere rather than competing content.
+
+    `denoise` high-passes and de-hisses that ambience. Phone audio recorded
+    outdoors carries wind and handling rumble that a music bed only makes
+    more obvious.
     """
     duration = max(0.2, duration)
     if fill == "cover":
@@ -187,9 +251,36 @@ def video_to_clip(
         # a loop back into the unusable head would undo the choice.
         args += ["-ss", f"{source_start:.3f}"]
     args += ["-i", str(src)]
+
+    ambience = max(0.0, min(1.0, ambience))
+    clean = "highpass=f=80,afftdn=nr=8:nf=-30," if denoise else ""
+    # The source's own audio, trimmed to the slot and padded in case the
+    # clip is shorter. `apad` before `atrim` matters: without it a
+    # four-second beat cut from a three-second clip ends with a stream
+    # shorter than its video, and the concat then drifts.
+    source_audio = (
+        f"[0:a]{clean}aresample=48000,apad,atrim=0:{duration:.3f},"
+        f"asetpts=N/SR/TB,volume={ambience:.3f}[amb]"
+    )
+
     if audio_path is not None:
         args += ["-i", str(audio_path)]
-        audio_chain = f"[1:a]aresample=48000,apad,atrim=0:{duration:.3f},asetpts=N/SR/TB[a]"
+        narration = (
+            f"[1:a]aresample=48000,apad,atrim=0:{duration:.3f},asetpts=N/SR/TB[nar]"
+        )
+        if ambience > 0.01:
+            # Ambience sits well under the narration - a third of its
+            # configured level - so it reads as the place the words are
+            # being spoken in rather than as a second voice.
+            audio_chain = (
+                f"{source_audio.replace(f'volume={ambience:.3f}', f'volume={ambience * 0.35:.3f}')};"
+                f"{narration};"
+                "[nar][amb]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+            )
+        else:
+            audio_chain = f"{narration};[nar]anull[a]"
+    elif ambience > 0.01:
+        audio_chain = f"{source_audio};[amb]anull[a]"
     else:
         args += [
             "-f", "lavfi",

@@ -27,10 +27,12 @@ from app.schemas.review import VariantRecord
 from app.services import render_service, settings_service
 from app.services.studio import (
     assembly_service,
+    edit_director,
     creative_director,
     material_service,
     planning_service,
     reviewer,
+    transition_planner,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,6 +146,13 @@ def produce(
 
     baseline = [float(s.estimated_duration or 0.0) for s in scenes]
     original_output = run.output_path
+    # A variant differs from the base video only by what its own spec says.
+    # Everything the edit director decided - the colour look, the loudness
+    # treatment, where the picture changes - carries over, or the A/B/C
+    # comparison would be measuring the grade going missing rather than
+    # the change the variant actually makes.
+    directive = edit_director.from_json(run.direction_json)
+    transitions = transition_planner.from_json(run.transitions_json)
     outcome = VariantOutcome()
     # Per-variant BGM and caption budget. Kept because the winner is not
     # necessarily the variant that ran last, and rebuilding the adopted cut
@@ -227,6 +236,9 @@ def produce(
             23,
             subtitle_override=subtitle_override,
             sfx=creative_director.sfx_render_list(db, decisions.sfx) or None,
+            transitions=transitions,
+            color=(directive.color if directive else None),
+            audio=(directive.audio if directive else None),
         )
         db.expire_all()
         job = db.get(Job, job.id)

@@ -681,6 +681,14 @@ export interface ProductionRun {
   // not reached the phase that fills the field.
   trend: TrendContext | null;
   assets: AssetDecisions | null;
+  // The 編集方針 this run was cut to, decided before anything was written.
+  // Null on a run made before the edit director existed, which the panel
+  // reports as such rather than as an empty policy.
+  direction: EditDirective | null;
+  transitions: TransitionPlan | null;
+  subtitle_design: SubtitleDesignPlan | null;
+  platform: string;
+  edit_style: string;
   review: VideoReview | null;
   report: ProductionReport | null;
   variants: VariantResult | null;
@@ -1113,10 +1121,43 @@ export interface SubtitleDecision {
   from_trend_profile: boolean;
 }
 
+/** One face the font ranking considered, and how it scored. */
+export interface FontCandidate {
+  asset_id: string;
+  name: string;
+  family: string;
+  score: number;
+  reasons: string[];
+  penalties: string[];
+  recently_used: boolean;
+}
+
+/**
+ * The field the caption font was chosen against.
+ *
+ * Shown alongside the winner because "why this font" is only answerable
+ * next to "instead of which others" - and because `profiled: false` means
+ * the ranking fell back to legibility alone, which the user needs to be
+ * told rather than left to infer from a font that never changes.
+ */
+export interface FontRanking {
+  considered: number;
+  eligible: number;
+  rejected_for_license: number;
+  below_readability_floor: number;
+  readability_floor: number;
+  caption_load: number;
+  size_pressure: number;
+  profiled: boolean;
+  recent_families: string[];
+  candidates: FontCandidate[];
+}
+
 export interface AssetDecisions {
   genre: string;
   genre_label: string;
   font: AssetChoice | null;
+  font_ranking: FontRanking | null;
   music: AssetChoice | null;
   sfx: SfxPlacement[];
   sfx_assets: AssetChoice[];
@@ -1248,4 +1289,280 @@ export interface ConnectedServices {
   by_category: Record<string, ConnectedService[]>;
   counts: { connected: number; total: number };
   note: string;
+}
+
+/* ---------------------------------------------------------------- 編集方針
+ *
+ * The AI edit director's output (backend: app/schemas/edit_style.py). This
+ * is what the "今回のKairo編集方針" panel renders: every decision the agent
+ * made before editing started, each with the reason it was made, so the
+ * judgements are inspectable rather than a black box.
+ */
+
+export type EditStyleId =
+  | "vlog"
+  | "travel"
+  | "cinematic"
+  | "food"
+  | "tutorial"
+  | "entertainment"
+  | "shorts"
+  | "documentary"
+  | "luxury"
+  | "casual";
+
+export type PlatformId =
+  | "youtube_shorts"
+  | "tiktok"
+  | "instagram_reels"
+  | "youtube_landscape"
+  | "generic";
+
+export type TransitionId =
+  | "cut"
+  | "fade"
+  | "dissolve"
+  | "dip_to_black"
+  | "slide_left"
+  | "slide_right"
+  | "slide_up"
+  | "push_left"
+  | "zoom"
+  | "match_cut";
+
+export interface ColorGrade {
+  id: string;
+  label: string;
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  gamma: number;
+  shadow_blue: number;
+  highlight_red: number;
+  strength: number;
+  reason: string;
+}
+
+export interface TransitionPolicy {
+  default: TransitionId;
+  allowed: TransitionId[];
+  max_ratio: number;
+  duration: number;
+  strong: TransitionId;
+  reason: string;
+}
+
+export interface SubtitlePolicy {
+  density: "minimal" | "low" | "medium" | "high";
+  coverage: number;
+  position: "top" | "middle" | "bottom";
+  style: "outline" | "box" | "plain";
+  size_scale: number;
+  max_lines: number;
+  emphasis: boolean;
+  emphasis_scale: number;
+  animation: "none" | "fade" | "pop" | "slide_up";
+  letter_spacing: number;
+  line_spacing: number;
+  reason: string;
+}
+
+export interface FontDirection {
+  wanted: string[];
+  avoid: string[];
+  luxury: number;
+  casual: number;
+  cinematic: number;
+  impact: number;
+  weight_min: number;
+  weight_max: number;
+  min_readability: number;
+  needs_japanese: boolean;
+  needs_latin: boolean;
+  reason: string;
+}
+
+export interface PhotoMotionPolicy {
+  intensity: number;
+  prefer: string[];
+  subject_safe: boolean;
+  reason: string;
+}
+
+export interface AudioPolicy {
+  normalize: boolean;
+  target_lufs: number;
+  bgm_mood: string;
+  bgm_bpm_range: number[];
+  bgm_volume: number;
+  duck_narration: boolean;
+  keep_ambience: number;
+  denoise: boolean;
+  sfx_per_minute: number;
+  narration_rate: number;
+  narration_style: string;
+  reason: string;
+}
+
+export interface StoryBeat {
+  id: string;
+  label: string;
+  purpose: string;
+  share: number;
+}
+
+export interface EditDirective {
+  style: EditStyleId;
+  style_label: string;
+  genre: string;
+  genre_label: string;
+  platform: PlatformId;
+  platform_label: string;
+  audience: string;
+  concept: string;
+  duration_seconds: number;
+  orientation: "vertical" | "horizontal" | "square";
+  width: number;
+  height: number;
+  mood: string;
+  tempo: "slow" | "medium" | "fast";
+  scene_seconds: number;
+  scene_seconds_min: number;
+  scene_seconds_max: number;
+  energy_curve: string[];
+  story: StoryBeat[];
+  hook_seconds: number;
+  hook_direction: string;
+  ending_direction: string;
+  cta: string;
+  subtitle: SubtitlePolicy;
+  font: FontDirection;
+  transitions: TransitionPolicy;
+  photo_motion: PhotoMotionPolicy;
+  color: ColorGrade;
+  audio: AudioPolicy;
+  /** "defaults" | "defaults+profile" | "defaults+profile+ai" - how much
+   *  evidence actually went into the directive. Shown so a defaults-only
+   *  policy is never presented as an AI judgement. */
+  decided_by: string;
+  notes: string[];
+  material_summary: string;
+  ai_note: string;
+}
+
+export interface TransitionChoice {
+  index: number;
+  transition: TransitionId;
+  label: string;
+  duration: number;
+  reason: string;
+  reason_label: string;
+  detail: string;
+}
+
+export interface TransitionPlan {
+  choices: TransitionChoice[];
+  non_cut_count: number;
+  boundary_count: number;
+  summary: string;
+}
+
+export interface CueDesign {
+  index: number;
+  text: string;
+  start: number;
+  end: number;
+  size_scale: number;
+  bold: boolean;
+  position: "top" | "middle" | "bottom";
+  style: "outline" | "box" | "plain";
+  color: string;
+  animation: "none" | "fade" | "pop" | "slide_up";
+  letter_spacing: number;
+  line_spacing: number;
+  emphasis: string[];
+  reason: string;
+}
+
+export interface SubtitleDesignPlan {
+  cues: CueDesign[];
+  dropped: number;
+  summary: string;
+}
+
+export interface EditStyleOption {
+  id: EditStyleId;
+  label: string;
+  description: string;
+  tempo: string;
+  scene_seconds: number;
+  subtitle_density: string;
+  color_grade: string;
+  bgm_mood: string;
+  genres: string[];
+}
+
+export interface PlatformOption {
+  id: PlatformId;
+  label: string;
+  orientation: string;
+  width: number;
+  height: number;
+  ideal_seconds: number;
+  max_seconds: number;
+  notes: string[];
+}
+
+export interface FontStarterItem {
+  id: string;
+  family: string;
+  purpose: string;
+  installed: boolean;
+  license_id: string;
+  variable_only: boolean;
+}
+
+export interface FontStarterSet {
+  items: FontStarterItem[];
+  installed_count: number;
+  total: number;
+  missing_ids: string[];
+  license: string;
+  source: string;
+}
+
+/**
+ * Kairo Style Memory (backend: app/services/studio/style_memory.py).
+ *
+ * `preferences` is what the user changed by hand and is applied to the next
+ * production. `tendencies` and `recent_fonts` are what Kairo itself chose,
+ * kept only so the next video does not repeat them - never treated as a
+ * preference.
+ */
+export interface StyleMemoryPreference {
+  value: string | number;
+  source: string;
+  at: string;
+  label: string;
+}
+
+export interface StyleMemoryTally {
+  value: string;
+  count: number;
+}
+
+export interface StyleMemory {
+  enabled: boolean;
+  path: string;
+  exists: boolean;
+  production_count: number;
+  updated_at: string | null;
+  preferences: Record<string, StyleMemoryPreference>;
+  recent_fonts: string[];
+  tendencies: {
+    font: StyleMemoryTally[];
+    edit_style: StyleMemoryTally[];
+    color_grade: StyleMemoryTally[];
+    music: StyleMemoryTally[];
+  };
 }

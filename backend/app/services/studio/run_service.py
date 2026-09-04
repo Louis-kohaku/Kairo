@@ -55,6 +55,8 @@ def create_run(
     mode: str = "full_auto",
     material_mode: str = "ai_auto",
     selected_asset_ids: list[str] | None = None,
+    platform: str = "",
+    edit_style: str = "",
 ) -> ProductionRun:
     existing = active_run(db, project_id)
     if existing is not None:
@@ -70,6 +72,11 @@ def create_run(
         orientation=orientation,
         material_mode=material_mode,
         selected_asset_ids=json.dumps(selected_asset_ids or [], ensure_ascii=False),
+        # Empty means "the edit director decides". Stored rather than
+        # resolved here so the run row records what the *user* asked for,
+        # and the directive records what was actually chosen.
+        platform=platform or "",
+        edit_style=edit_style or "",
     )
     db.add(run)
     db.commit()
@@ -175,6 +182,15 @@ def to_dict(db, run: ProductionRun | None) -> dict | None:
         "error_detail": load_json(run.error_detail),
         "research": load_json(run.research_json),
         "strategy": load_json(run.strategy_json),
+        # The 編集方針 this run was cut to, and the per-boundary / per-caption
+        # decisions derived from it. Null on a run made before the edit
+        # director existed, which the UI reports as such rather than as an
+        # empty policy.
+        "direction": load_json(run.direction_json),
+        "transitions": load_json(run.transitions_json),
+        "subtitle_design": load_json(run.subtitle_design_json),
+        "platform": run.platform or "generic",
+        "edit_style": run.edit_style or "",
         "quality": load_json(run.quality_json),
         "improvement": load_json(run.improvement_json),
         "model_plan": load_json(run.model_plan_json),

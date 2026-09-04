@@ -38,6 +38,7 @@ from app.models.media_asset import MediaAsset
 from app.schemas.material import MaterialAnalysis, UsableRange
 from app.services import llm_client, media_service
 from app.services.ffmpeg import compose
+from app.services.studio import frame_quality
 from app.services.json_extract import JSONExtractionError, parse_json_object
 
 logger = logging.getLogger(__name__)
@@ -238,13 +239,21 @@ def _measure_video(path: Path, duration: float) -> dict:
         mid = _measure_image(frames[len(frames) // 2])
         colors = mid.get("colors") or []
 
+        representative = frames[len(frames) // 2]
         return {
             "frames": frames,
             "brightness": round(sum(brightnesses) / len(brightnesses), 3),
             "motion": round(min(1.0, motion * 4), 3),
             "usable": UsableRange(start=usable_start, end=usable_end, reason=reason),
             "colors": colors,
-            "representative": frames[len(frames) // 2],
+            "representative": representative,
+            # Requirement 7: pin-sharpness and camera shake, measured from
+            # the same frames already extracted for brightness rather than
+            # by decoding the clip a second time.
+            "sharpness": frame_quality.sharpness(representative),
+            "shake": frame_quality.shake(frames),
+            "subject": frame_quality.subject_center(representative),
+            "signature": frame_quality.signature(representative),
             "keep_dir": tmp,
         }
     except Exception:
@@ -498,11 +507,22 @@ def analyze_asset(
             analysis.brightness = measured.get("brightness")
             analysis.dominant_colors = measured.get("colors") or []
             representative = path
+            analysis.sharpness = frame_quality.sharpness(path)
+            subject = frame_quality.subject_center(path)
+            if subject is not None:
+                analysis.subject_x, analysis.subject_y = subject
+            analysis.signature = frame_quality.signature(path) or ""
         elif asset.kind == "video":
             measured = _measure_video(path, asset.duration or 0.0)
             analysis.brightness = measured.get("brightness")
             analysis.motion = measured.get("motion")
             analysis.dominant_colors = measured.get("colors") or []
+            analysis.sharpness = measured.get("sharpness")
+            analysis.shake = measured.get("shake")
+            subject = measured.get("subject")
+            if subject is not None:
+                analysis.subject_x, analysis.subject_y = subject
+            analysis.signature = measured.get("signature") or ""
             usable = measured.get("usable")
             analysis.usable = usable if isinstance(usable, UsableRange) else UsableRange(
                 start=0.0, end=asset.duration or 0.0
@@ -544,6 +564,19 @@ def analyze_asset(
             if tag not in tags:
                 tags.append(tag)
 
+        # Technical usability, from the measurements above. Kept apart from
+        # subject relevance (which the matching stage judges from tags), so
+        # a plan can say "sharp but off-topic" rather than one opaque number.
+        analysis.quality_score, analysis.quality_notes = frame_quality.quality_score(
+            sharpness_value=analysis.sharpness,
+            brightness=analysis.brightness,
+            shake_value=analysis.shake,
+        )
+        asset.quality_score = analysis.quality_score
+        asset.sharpness = analysis.sharpness
+        asset.shake = analysis.shake
+        asset.signature = analysis.signature or None
+
         analysis.tags = tags[:14]
         if analysis.analyzed_by != "vision_ai":
             analysis.notes = (
@@ -567,6 +600,42 @@ def analyze_asset(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def mark_duplicates(db, analyses: list[MaterialAnalysis]) -> int:
+    """Finds material that is the same shot twice (requirement 7).
+
+    Compares the average hashes computed during analysis. Detected here,
+    across the whole project, rather than per file - a duplicate is a
+    relationship between two assets and cannot be seen from one of them.
+
+    Marking, not deleting: the user uploaded both, and one of a burst of
+    three may be the one they want. The matching stage down-ranks the later
+    copies, and the material list shows the badge, so the decision stays
+    visible and reversible.
+    """
+    from app.services.studio import frame_quality as fq
+
+    marked = 0
+    for i, analysis in enumerate(analyses):
+        if not analysis.signature:
+            continue
+        for earlier in analyses[:i]:
+            if not earlier.signature or earlier.asset_id in analysis.duplicate_of:
+                continue
+            distance = fq.hamming(analysis.signature, earlier.signature)
+            if distance is not None and distance <= fq.DUPLICATE_THRESHOLD:
+                analysis.duplicate_of.append(earlier.asset_id)
+        if analysis.duplicate_of:
+            marked += 1
+            note = f"同じような素材が{len(analysis.duplicate_of)}件あります"
+            analysis.notes = f"{analysis.notes} / {note}".strip(" /") if analysis.notes else note
+            asset = db.get(MediaAsset, analysis.asset_id)
+            if asset is not None:
+                asset.analysis_json = analysis.model_dump_json()
+    if marked:
+        db.commit()
+    return marked
+
+
 def analyze_project(
     db, project_id: str, *, force: bool = False, on_progress=None
 ) -> list[MaterialAnalysis]:
@@ -583,6 +652,7 @@ def analyze_project(
             # Already recorded on the asset row; one unreadable file must
             # not stop the other nine from being usable.
             continue
+    mark_duplicates(db, results)
     return results
 
 

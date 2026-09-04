@@ -70,6 +70,13 @@ class FontInfo:
     vendor_url: str = ""
     is_variable: bool = False
     collection_index: int = 0
+    # Filled in after reading, by the scan, from an actual raster of the
+    # face (services/library/font_profile.ink_coverage). Not read from the
+    # file, because the file's own answer is `weight_class` and display
+    # faces routinely declare it wrong; 0.0/0 means "not measured", and
+    # every consumer then falls back to `weight_class`.
+    ink_coverage: float = 0.0
+    measured_weight: int = 0
     # The 10 PANOSE classification bytes from OS/2. This is the font's own
     # statement about whether it is serif, sans, rounded, decorative or
     # handwritten - which is why Kairo reads it instead of matching

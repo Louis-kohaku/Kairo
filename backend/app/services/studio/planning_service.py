@@ -61,12 +61,45 @@ def _ask_json(messages: list[dict], what: str, temperature: float = 0.4) -> dict
 # ------------------------------------------------------------- strategy
 
 
+def _directive_block(directive) -> str:
+    """The edit directive as prompt context.
+
+    The strategy writer is told what has *already* been decided, so it
+    writes a brief that fits the edit rather than one the edit then has to
+    contradict. Deliberately phrased as settled decisions, not suggestions.
+    """
+    if directive is None or not getattr(directive, "style_label", ""):
+        return ""
+    beats = " -> ".join(b.label for b in directive.story) or "-"
+    return (
+        "【すでに決まっている編集方針（変更しないこと）】\n"
+        f"- 編集スタイル: {directive.style_label}（{directive.mood}）\n"
+        f"- 配信先: {directive.platform_label}\n"
+        f"- テンポ: {directive.tempo} / 1カット約{directive.scene_seconds:.1f}秒\n"
+        f"- 構成: {beats}\n"
+        f"- 字幕量: {directive.subtitle.density}\n"
+        f"- 色味: {directive.color.label}\n"
+        f"- BGMの雰囲気: {directive.audio.bgm_mood}\n"
+        + (
+            f"- 冒頭で見せるもの: {directive.hook_direction}\n"
+            if directive.hook_direction
+            else ""
+        )
+        + (
+            f"- 終わり方: {directive.cta}\n"
+            if getattr(directive, "cta", "")
+            else ""
+        )
+    )
+
+
 def _strategy_prompt(
     instruction: str,
     duration_seconds: float,
     research: ResearchResult,
     orientation: str,
     material_hint: str = "",
+    directive=None,
 ) -> list[dict]:
     trends = research.trends
     orientation_label = {
@@ -101,7 +134,9 @@ def _strategy_prompt(
         f"依頼: {instruction}\n"
         f"想定尺: 約{duration_seconds:.0f}秒\n"
         f"フォーマット: {orientation_label}\n\n"
-        f"{research_block}"
+        + _directive_block(directive)
+        + ("\n" if directive is not None else "")
+        + f"{research_block}"
         + ("\n\n" + material_hint if material_hint else "")
     )
     return [
@@ -116,6 +151,7 @@ def generate_strategy(
     research: ResearchResult,
     orientation: str = "vertical",
     material_hint: str = "",
+    directive=None,
 ) -> ProductionStrategy:
     """`material_hint` describes what the user actually uploaded.
 
@@ -127,7 +163,9 @@ def generate_strategy(
     images.
     """
     data = _ask_json(
-        _strategy_prompt(instruction, duration_seconds, research, orientation, material_hint),
+        _strategy_prompt(
+            instruction, duration_seconds, research, orientation, material_hint, directive
+        ),
         "制作戦略",
     )
     try:

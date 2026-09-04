@@ -1,7 +1,14 @@
 import type {
   ApplyResult,
   ConnectedServices,
+  EditDirective,
+  EditStyleOption,
   FontCatalogEntry,
+  FontStarterSet,
+  PlatformOption,
+  StyleMemory,
+  SubtitleDesignPlan,
+  TransitionPlan,
   GenreBreakdown,
   LibraryAsset,
   LibraryOverview,
@@ -392,6 +399,25 @@ export const api = {
   getFontCatalog: () =>
     request<{ catalog: FontCatalogEntry[]; note: string }>("/api/library/fonts/catalog"),
 
+  /** The recommended font set, and how much of it is installed. The OS's
+   *  own Japanese fonts are all document faces, so without these the
+   *  caption font barely changes between videos however the style differs. */
+  /** What Kairo has learned about how this user likes their videos. */
+  getStyleMemory: () => request<StyleMemory>("/api/settings/style-memory"),
+
+  clearStyleMemory: () =>
+    request<StyleMemory>("/api/settings/style-memory", { method: "DELETE" }),
+
+  getFontStarterSet: () =>
+    request<FontStarterSet>("/api/library/fonts/starter-set"),
+
+  installFontStarterSet: () =>
+    request<{
+      installed: { family: string }[];
+      failed: { id: string; error: string }[];
+      starter_set: FontStarterSet;
+    }>("/api/library/fonts/starter-set", { method: "POST" }),
+
   downloadFont: (id: string) =>
     request<{ downloaded: { family: string; files: string[]; license_id: string } }>(
       "/api/library/fonts/download",
@@ -470,6 +496,10 @@ export const api = {
       mode?: "full_auto" | "co_creation";
       materialMode?: MaterialMode;
       selectedAssetIds?: string[];
+      // Empty means "let the edit director decide from the instruction and
+      // the genre", which is the default and what Full Auto uses.
+      platform?: string;
+      editStyle?: string;
     },
   ) =>
     request<ProductionRun>(`/api/projects/${projectId}/studio/start`, {
@@ -481,8 +511,27 @@ export const api = {
         mode: opts.mode ?? "full_auto",
         material_mode: opts.materialMode ?? "ai_auto",
         selected_asset_ids: opts.selectedAssetIds ?? [],
+        platform: opts.platform ?? "",
+        edit_style: opts.editStyle ?? "",
       }),
     }),
+
+  /** The edit styles and delivery targets the launcher offers. Served from
+   *  the same tables the director uses, so the picker can never offer a
+   *  style the pipeline does not implement. */
+  getEditStyles: () =>
+    request<{ styles: EditStyleOption[]; platforms: PlatformOption[] }>(
+      "/api/studio/edit-styles",
+    ),
+
+  /** The 編集方針 the latest run decided, with its transition and caption
+   *  plans. Null fields mean the run predates the edit director. */
+  getDirection: (projectId: string) =>
+    request<{
+      direction: EditDirective | null;
+      transitions: TransitionPlan | null;
+      subtitle_design: SubtitleDesignPlan | null;
+    }>(`/api/projects/${projectId}/direction`),
 
   getStudioRun: (projectId: string) =>
     request<{ run: ProductionRun | null; phases: Phase[] }>(

@@ -102,7 +102,13 @@ def render_scene_visual(
 # ----------------------------------------------------------- narration
 
 
-def synthesize_narration(scene: Scene, index: int, project_id: str, voice_id: str | None) -> tuple[Path | None, float]:
+def synthesize_narration(
+    scene: Scene,
+    index: int,
+    project_id: str,
+    voice_id: str | None,
+    rate: int = 0,
+) -> tuple[Path | None, float]:
     """Speaks the scene's narration. Returns (path, measured seconds).
 
     A failure is not fatal: the scene keeps its planned duration and the
@@ -117,7 +123,7 @@ def synthesize_narration(scene: Scene, index: int, project_id: str, voice_id: st
 
     dest = scene_audio_dir(project_id) / f"narr_{index:03d}_{scene.id[:8]}.wav"
     try:
-        tts_service.synthesize_to_wav(text, voice_id, dest)
+        tts_service.synthesize_to_wav(text, voice_id, dest, rate=rate)
     except Exception:
         logger.exception("Narration synthesis failed for scene %s", scene.id)
         return None, 0.0
@@ -172,6 +178,9 @@ def build_scene_clip(
     source_start: float = 0.0,
     crf: int = 20,
     is_last: bool = False,
+    move=None,
+    ambience: float = 0.0,
+    denoise: bool = False,
 ) -> Path:
     """Renders one scene into a finished video file with its own audio.
 
@@ -200,27 +209,60 @@ def build_scene_clip(
             # ratio of the short being made. Letterboxing it would hand
             # back half the screen as black bars, so it fills the frame.
             fill="cover",
+            # Requirement 11's 環境音の保持. Only for footage that actually
+            # has an audio stream - asking ffmpeg for [0:a] on a silent
+            # clip fails the whole filtergraph and would lose the scene.
+            ambience=ambience,
+            denoise=denoise,
         )
     else:
         if visual_path is None:
             raise RuntimeError(f"Scene {scene.id} has no visual to render")
-        zoom_start, zoom_end, pan = resolve_camera(scene.camera or "")
-        compose.still_to_clip(
-            visual_path,
-            dest,
-            duration,
-            project.width,
-            project.height,
-            project.fps,
-            audio_path=narration_path,
-            audio_delay=NARRATION_LEAD_IN if narration_path else 0.0,
-            zoom_start=zoom_start,
-            zoom_end=zoom_end,
-            pan=pan,
-            crf=crf,
-            fade_in=0.0,
-            fade_out=0.4 if is_last else 0.0,
-        )
+        if move is not None:
+            # A subject-aware move (services/studio/photo_motion.py): the
+            # window travels around where the picture's detail actually is,
+            # so a person standing on the left is not walked out of frame
+            # by a "pan right".
+            compose.still_to_clip(
+                visual_path,
+                dest,
+                duration,
+                project.width,
+                project.height,
+                project.fps,
+                audio_path=narration_path,
+                audio_delay=NARRATION_LEAD_IN if narration_path else 0.0,
+                zoom_start=move.zoom_start,
+                zoom_end=move.zoom_end,
+                pan="center",
+                crf=crf,
+                fade_in=0.0,
+                fade_out=0.4 if is_last else 0.0,
+                x_start=move.x_start,
+                y_start=move.y_start,
+                x_end=move.x_end,
+                y_end=move.y_end,
+            )
+        else:
+            # No directive and no subject measurement: the original
+            # camera-word move, centred on the frame.
+            zoom_start, zoom_end, pan = resolve_camera(scene.camera or "")
+            compose.still_to_clip(
+                visual_path,
+                dest,
+                duration,
+                project.width,
+                project.height,
+                project.fps,
+                audio_path=narration_path,
+                audio_delay=NARRATION_LEAD_IN if narration_path else 0.0,
+                zoom_start=zoom_start,
+                zoom_end=zoom_end,
+                pan=pan,
+                crf=crf,
+                fade_in=0.0,
+                fade_out=0.4 if is_last else 0.0,
+            )
 
     kind = _pick_sfx(scene)
     if kind:
@@ -340,6 +382,7 @@ def rebuild_scene(
     regenerate_visual: bool = False,
     resynthesize_narration: bool = False,
     is_last: bool = False,
+    directive=None,
 ) -> MediaAsset:
     """Rebuilds one scene's material end to end and re-registers its asset.
 
@@ -373,11 +416,38 @@ def rebuild_scene(
     if use_narration:
         candidate = scene_audio_dir(project.id) / f"narr_{index:03d}_{scene.id[:8]}.wav"
         if resynthesize_narration or not candidate.exists():
-            narration_path, seconds = synthesize_narration(scene, index, project.id, voice_id)
+            narration_path, seconds = synthesize_narration(
+                scene,
+                index,
+                project.id,
+                voice_id,
+                # The delivery the edit director chose for this video
+                # (requirement 12): a documentary is spoken slower than an
+                # entertainment short.
+                rate=int(getattr(getattr(directive, "audio", None), "narration_rate", 0) or 0),
+            )
             if narration_path is not None:
                 scene.narration_duration = seconds
         elif candidate.exists():
             narration_path = candidate
+
+    move = None
+    if directive is not None and visual_path is not None and getattr(directive, "style_label", ""):
+        move = _plan_photo_move(db, scene, index, project, directive, visual_path, user_source)
+
+    # How much of the footage's own sound to keep. Read from the source
+    # asset rather than assumed: a clip with no audio stream cannot have
+    # its ambience mixed, and asking for it would fail the filtergraph.
+    ambience = 0.0
+    denoise = False
+    if video_source is not None and directive is not None:
+        has_audio = False
+        if user_source is not None and user_source.asset_id:
+            source_asset = db.get(MediaAsset, user_source.asset_id)
+            has_audio = bool(source_asset is not None and source_asset.has_audio)
+        if has_audio:
+            ambience = max(0.0, min(1.0, directive.audio.keep_ambience))
+            denoise = bool(directive.audio.denoise)
 
     clip = build_scene_clip(
         scene,
@@ -389,12 +459,110 @@ def rebuild_scene(
         source_start=source_start,
         crf=crf,
         is_last=is_last,
+        move=move,
+        ambience=ambience,
+        denoise=denoise,
     )
     return register_clip_asset(db, project, scene, clip, index)
 
 
+def _plan_photo_move(db, scene, index, project, directive, visual_path, user_source):
+    """The camera move for a still, from the picture and the style.
+
+    The subject position is taken from the cached material analysis when
+    the still is the user's own photo (it was measured at import), and
+    measured on the spot otherwise - a generated or downloaded image has no
+    analysis row, and measuring one frame costs a few milliseconds.
+
+    Never raises: a failed measurement means the move falls back to the
+    frame centre, which is what every still did before this existed.
+    """
+    from app.services.studio import frame_quality, photo_motion
+
+    subject: tuple[float, float] | None = None
+    source_size: tuple[int, int] | None = None
+    if user_source is not None and user_source.asset_id:
+        from app.services.studio import material_analysis
+
+        asset = db.get(MediaAsset, user_source.asset_id)
+        cached = material_analysis.load_analysis(asset) if asset is not None else None
+        if cached is not None:
+            if cached.subject_x is not None and cached.subject_y is not None:
+                subject = (cached.subject_x, cached.subject_y)
+            if cached.width and cached.height:
+                source_size = (cached.width, cached.height)
+    if subject is None:
+        try:
+            subject = frame_quality.subject_center(visual_path)
+        except Exception:  # noqa: BLE001
+            subject = None
+    if source_size is None:
+        try:
+            from PIL import Image  # noqa: PLC0415
+
+            with Image.open(visual_path) as im:
+                source_size = im.size
+        except Exception:  # noqa: BLE001
+            source_size = None
+
+    return photo_motion.plan_move(
+        camera=scene.camera or "",
+        index=index,
+        directive=directive,
+        subject=subject,
+        source_size=source_size,
+        target_size=(project.width, project.height),
+    )
+
+
 # ------------------------------------------------------- filling the gaps
 
+
+
+# A downloaded still darker than this is a black frame on screen, whatever
+# its licence says. Measured as mean brightness 0.0-1.0; Kairo's own
+# material analysis uses 0.07 as "near-black", and this is deliberately
+# higher because a *filler* shot has no reason to be dark at all.
+_WEB_MIN_BRIGHTNESS = 0.16
+_WEB_MAX_BRIGHTNESS = 0.94
+# A picture with almost no tonal spread is a scan, a diagram or a solid
+# colour - none of which read as footage in a vlog.
+_WEB_MIN_CONTRAST = 0.035
+_WEB_MIN_PIXELS = 240 * 240
+
+
+def _web_image_usable(path: Path) -> tuple[bool, str]:
+    """Whether a downloaded still is worth putting on screen.
+
+    Deliberately a small set of measurable, non-aesthetic rejections: too
+    dark, blown out, flat, or too small to fill a 1080-wide frame. It is
+    not a relevance check - the search decided that - and it does not judge
+    content. Anything Pillow cannot open is accepted rather than rejected,
+    because the encoder is the authority on whether a file is renderable
+    and refusing on a failed measurement would drop usable material.
+    """
+    try:
+        from PIL import Image, ImageStat  # noqa: PLC0415
+
+        with Image.open(path) as image:
+            width, height = image.size
+            if width * height < _WEB_MIN_PIXELS:
+                return False, f"小さすぎる画像です（{width}x{height}）"
+            grey = image.convert("L")
+            grey.thumbnail((160, 160))
+            stat = ImageStat.Stat(grey)
+            brightness = stat.mean[0] / 255.0
+            contrast = stat.stddev[0] / 255.0
+    except Exception:  # noqa: BLE001
+        return True, ""
+
+    if brightness < _WEB_MIN_BRIGHTNESS:
+        return False, f"暗すぎる画像です（明るさ{brightness:.2f}）"
+    if brightness > _WEB_MAX_BRIGHTNESS:
+        return False, f"白飛びした画像です（明るさ{brightness:.2f}）"
+    if contrast < _WEB_MIN_CONTRAST:
+        return False, f"のっぺりした画像です（コントラスト{contrast:.2f}）"
+    return True, ""
 
 
 def _web_identity(candidate) -> str:
@@ -468,6 +636,20 @@ def fill_missing_visual(
                 path = web_material_service.download(candidate, project.id)
             except web_material_service.WebMaterialUnavailable as exc:
                 logger.info("Web material rejected: %s", exc)
+                continue
+            # What came back has to be looked at before it is used.
+            # Openverse and Wikimedia Commons return whatever their text
+            # search matched, and a measured 60-second Okinawa vlog came
+            # back with an 1859 newspaper cover, a nebula photograph and a
+            # press portrait among its filler shots. Kairo's own material is
+            # measured at import and can be rejected for being unusable;
+            # material it fetches was going straight onto the timeline
+            # unexamined, which is the one path where nothing had looked at
+            # the pixels before they were rendered.
+            usable, reject_reason = _web_image_usable(path)
+            if not usable:
+                logger.info("Web material unusable (%s): %s", reject_reason, path.name)
+                path.unlink(missing_ok=True)
                 continue
             try:
                 asset = media_service.register_file(

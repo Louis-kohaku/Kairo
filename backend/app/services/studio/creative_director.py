@@ -28,10 +28,12 @@ from app.core.config import LIBRARY_ROOT
 from app.core.paths import assets_dir
 from app.models.library import LibraryAsset
 from app.models.media_asset import MediaAsset
+from app.schemas.edit_style import EditDirective, FontCandidate
 from app.schemas.production_assets import (
     AssetChoice,
     AssetDecisions,
     BeatSyncResult,
+    FontRanking,
     LicenseRef,
     SfxPlacement,
     SubtitleDecision,
@@ -40,7 +42,8 @@ from app.schemas.settings import SubtitleSettings
 from app.schemas.trend import GenreProfileData
 from app.services import subtitle_style
 from app.services.ffmpeg.probe import probe_media
-from app.services.library import audio_library, selector
+from app.services.library import audio_library, font_ranking, licenses, selector
+from app.services.studio import style_memory
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +92,110 @@ def choose_font(
     profile: GenreProfileData | None,
     require_commercial: bool = True,
 ) -> AssetChoice:
+    """The caption face, chosen from the genre alone.
+
+    Kept for callers that have no directive (the library screen's preview,
+    and any older path). A production run goes through
+    `choose_font_for_directive`, which ranks against what this specific
+    video needs instead of what the genre generally wants.
+    """
     sel = selector.select_font(
         db, genre=genre, profile=profile, require_commercial=require_commercial
     )
     return _choice_from_selection("font", sel)
+
+
+def choose_font_for_directive(
+    db,
+    directive: EditDirective,
+    *,
+    require_commercial: bool = True,
+    recent_families: list[str] | None = None,
+) -> tuple[AssetChoice, list[FontCandidate], dict]:
+    """The caption face for one specific video (requirement 3).
+
+    Returns the choice, the runners-up, and the ranking diagnostics. All
+    three are stored on the run: the brief asks for the font decision to be
+    inspectable afterwards, and a winner with no field behind it explains
+    nothing.
+
+    Falls back to the genre-only selector when the ranking finds nothing -
+    an over-strict directive (a readability floor no installed face clears,
+    say) must not leave a production with no caption font at all.
+    """
+    recent = (
+        recent_families
+        if recent_families is not None
+        else style_memory.recent_fonts()
+    )
+    candidates, diagnostics = font_ranking.rank(
+        db, directive, require_commercial=require_commercial, recent_families=recent
+    )
+    ranked = font_ranking.unique_families(candidates)
+    if not ranked:
+        sel = selector.select_font(
+            db,
+            genre=directive.genre,
+            profile=None,
+            require_commercial=require_commercial,
+            # The directive's floor is what emptied the list; drop to the
+            # selector's own minimum rather than shipping boxes for text.
+            min_readability=40,
+        )
+        choice = _choice_from_selection("font", sel)
+        if choice.found:
+            choice.reasons.insert(
+                0,
+                "編集方針の条件に合う書体が見つからなかったため、"
+                "可読性を基準に選び直しました",
+            )
+            choice.reason = choice.reasons[0]
+        return choice, [], diagnostics
+
+    best = ranked[0]
+    row = db.get(LibraryAsset, best.asset_id)
+    if row is None:
+        return AssetChoice(kind="font", found=False, reason="選択した書体が見つかりません"), ranked, diagnostics
+
+    lic = {
+        "id": row.license_id,
+        "name": row.license_name,
+        "status": row.license_status,
+        "status_label": licenses.status_label(row.license_status),
+        "url": row.license_url,
+        "attribution_required": row.attribution_required,
+        "attribution": row.attribution_text,
+        "commercial_use": row.commercial_use,
+    }
+    reasons = list(best.reasons)
+    if len(ranked) > 1:
+        reasons.append(
+            f"候補{diagnostics.get('eligible', 0)}書体を採点し、"
+            f"次点「{ranked[1].family}」({ranked[1].score:.0f}点)を上回りました"
+        )
+    if not diagnostics.get("profiled"):
+        reasons.append(
+            "フォントの印象プロファイルが未算出のため、可読性中心の採点です"
+            "（設定 > ライブラリで再スキャンすると精度が上がります）"
+        )
+    choice = AssetChoice(
+        kind="font",
+        found=True,
+        asset_id=row.id,
+        name=row.name,
+        family=row.family or row.name,
+        path=row.path,
+        category=row.category,
+        source=row.source,
+        source_url=row.source_url,
+        reason=" / ".join(reasons[:3]) or "編集方針に最も合う書体として選択",
+        reasons=reasons,
+        score=best.score,
+        license=LicenseRef(**lic),
+        considered=int(diagnostics.get("considered", 0)),
+        rejected_for_license=int(diagnostics.get("rejected_for_license", 0)),
+    )
+    return choice, ranked, diagnostics
 
 
 def subtitle_settings_for(
@@ -102,14 +205,19 @@ def subtitle_settings_for(
     *,
     width: int,
     height: int,
+    directive: EditDirective | None = None,
 ) -> tuple[SubtitleSettings, SubtitleDecision]:
     """The caption style this production will actually be burned with.
 
     Derived from the user's settings, overridden only where the agent has a
-    reason: the chosen family, and the position/style the genre profile
-    asks for. Size is deliberately *not* overridden - it is the one caption
-    setting a user tunes to their own screen, and silently changing it
-    would make the Settings screen a lie.
+    reason: the chosen family, the position/style the directive or the
+    genre profile asks for, and - when a delivery platform demands it - a
+    scale on the size.
+
+    Size stays anchored to the user's setting. The directive may scale it
+    for the format (a 16:9 delivery needs smaller text than a 9:16 one),
+    but it is a multiplier on what the user chose rather than a replacement
+    for it, so the Settings screen keeps meaning what it says.
     """
     resolved = base.model_copy(deep=True)
     reasons: list[str] = []
@@ -119,7 +227,30 @@ def subtitle_settings_for(
         resolved.font = font.family
         reasons.append(f"書体: {font.family}（{font.reason}）")
 
-    if profile is not None:
+    if directive is not None and directive.style_label:
+        if directive.subtitle.position != resolved.position:
+            resolved.position = directive.subtitle.position  # type: ignore[assignment]
+            reasons.append(
+                f"表示位置: {directive.subtitle.position}（{directive.platform_label}の画面構成に合わせて）"
+            )
+        if directive.subtitle.style != resolved.style:
+            resolved.style = directive.subtitle.style  # type: ignore[assignment]
+            reasons.append(f"縁取り: {directive.subtitle.style}（{directive.style_label}の方針）")
+        scale = directive.subtitle.size_scale
+        if abs(scale - 1.0) > 0.02:
+            before = resolved.size
+            resolved.size = max(12, min(200, int(round(resolved.size * scale))))
+            reasons.append(
+                f"サイズ: {before}px→{resolved.size}px"
+                f"（{directive.platform_label}向けに{scale:.2f}倍）"
+            )
+
+    # The genre profile only speaks when no directive did. The directive has
+    # already folded the profile in (edit_director._apply_profile) *and*
+    # applied the platform's rules on top, so letting the raw profile
+    # override here would undo the platform decision - a Shorts caption
+    # pushed up off the UI would drop straight back onto it.
+    if profile is not None and (directive is None or not directive.style_label):
         if profile.subtitle_position in ("top", "middle", "bottom"):
             if profile.subtitle_position != resolved.position:
                 resolved.position = profile.subtitle_position  # type: ignore[assignment]
@@ -357,6 +488,7 @@ def plan_sfx(
     *,
     profile: GenreProfileData | None = None,
     require_commercial: bool = True,
+    directive: EditDirective | None = None,
 ) -> tuple[list[SfxPlacement], list[AssetChoice]]:
     """Where the effects go, and why each one is there.
 
@@ -419,13 +551,39 @@ def plan_sfx(
             )
         cursor += duration
 
-    limit = max(2, int(MAX_SFX_PER_MINUTE * max(total, 1.0) / 60.0))
+    # The style decides the density. A documentary that tolerates 1.5
+    # effects per minute must not get the short-form default of 12, and a
+    # Vlog with a whoosh at every cut is the "エフェクトが多い＝高品質" trap
+    # the brief rules out.
+    per_minute = MAX_SFX_PER_MINUTE
+    if directive is not None and directive.style_label:
+        per_minute = max(0.0, directive.audio.sfx_per_minute)
+    if per_minute <= 0.01:
+        return [], [c for c in resolved.values() if c.found]
+    limit = max(1, int(per_minute * max(total, 1.0) / 60.0))
     if len(placements) > limit:
-        keep = [p for p in placements if p.trigger in ("hook", "ending", "script")]
-        others = [p for p in placements if p not in keep]
-        # Thin the scene-change accents evenly rather than dropping the tail.
-        step = max(1, len(others) // max(1, limit - len(keep)))
-        keep += others[::step][: max(0, limit - len(keep))]
+        # Priority within the budget: the opening and the closing accent
+        # first (they mark the video's edges), then the effects the scene
+        # writer asked for by name, then the automatic scene-change accents.
+        #
+        # The writer's requests used to be exempt from the cap entirely,
+        # which meant a Vlog whose script asked for a whoosh on ten of its
+        # twenty-four beats got twelve effects against a style budget of
+        # four. An explicit request is a strong preference about *which*
+        # effects survive, not permission to ignore how many the style
+        # tolerates - "エフェクトが多い＝高品質" is exactly what the brief
+        # rules out.
+        priority = {"hook": 0, "ending": 0, "script": 1}
+        ordered = sorted(
+            placements, key=lambda p: (priority.get(p.trigger, 2), p.at)
+        )
+        edges = [p for p in ordered if priority.get(p.trigger, 2) == 0][:2]
+        rest = [p for p in ordered if p not in edges]
+        room = max(0, limit - len(edges))
+        # Thin the remainder evenly rather than dropping the tail, so the
+        # effects that survive are spread across the video.
+        step = max(1, len(rest) // room) if room else 1
+        keep = edges + (rest[::step][:room] if room else [])
         placements = sorted(keep, key=lambda p: p.at)
 
     return placements, [c for c in resolved.values() if c.found]
@@ -476,11 +634,29 @@ def build(
     height: int,
     require_commercial: bool = True,
     target_scene_seconds: float = 3.0,
+    directive: EditDirective | None = None,
 ) -> AssetDecisions:
-    """One call, every creative-asset decision for a run."""
+    """One call, every creative-asset decision for a run.
+
+    `directive` is what makes the font and the SFX density decisions about
+    *this* video rather than about its genre. It is optional so the older
+    genre-only path still works unchanged for callers that have none.
+    """
     ensure_library(db)
 
-    font = choose_font(db, genre=genre, profile=profile, require_commercial=require_commercial)
+    ranking: FontRanking | None = None
+    if directive is not None and directive.style_label:
+        font, candidates, diagnostics = choose_font_for_directive(
+            db, directive, require_commercial=require_commercial
+        )
+        ranking = FontRanking(
+            **{k: v for k, v in diagnostics.items() if k in FontRanking.model_fields},
+            candidates=[c.model_dump() for c in candidates],
+        )
+    else:
+        font = choose_font(
+            db, genre=genre, profile=profile, require_commercial=require_commercial
+        )
     music = choose_music(
         db,
         mood=mood,
@@ -490,11 +666,15 @@ def build(
         require_commercial=require_commercial,
     )
     _resolved, subtitle = subtitle_settings_for(
-        subtitle_base, font, profile, width=width, height=height
+        subtitle_base, font, profile, width=width, height=height, directive=directive
     )
     beat = plan_beat_sync(scenes, music, target_scene_seconds=target_scene_seconds)
     placements, sfx_assets = plan_sfx(
-        db, scenes, profile=profile, require_commercial=require_commercial
+        db,
+        scenes,
+        profile=profile,
+        require_commercial=require_commercial,
+        directive=directive,
     )
 
     notes: list[str] = []
@@ -509,6 +689,7 @@ def build(
         genre=genre,
         genre_label=genre_label,
         font=font,
+        font_ranking=ranking,
         music=music,
         sfx=placements,
         sfx_assets=sfx_assets,

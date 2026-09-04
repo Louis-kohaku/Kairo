@@ -36,7 +36,7 @@ from pathlib import Path
 
 from app.core.config import LIBRARY_ROOT
 from app.models.library import LibraryAsset
-from app.services.library import fontfile, licenses
+from app.services.library import font_profile, fontfile, licenses
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,32 @@ def system_font_dirs() -> list[Path]:
 _PANOSE_SERIF_STYLES_SANS = {11, 12, 13}
 _PANOSE_SERIF_STYLE_ROUNDED = 15
 
+# Family-name markers for Japanese programming fonts. These families are
+# hybrids (proportional CJK + fixed-width Latin), so no table in the file
+# reports them as monospaced, yet they are editor fonts and read as such on
+# screen. Matched case-insensitively as substrings of the family name.
+_CODING_FAMILY_MARKERS: tuple[str, ...] = (
+    "udev gothic",
+    "hackgen",
+    "plemol",
+    "moralerspace",
+    "cica",
+    "ricty",
+    "myrica",
+    "firge",
+    "juisee",
+    "bizin gothic",
+    "白源",
+    "jetbrains",
+    "cascadia",
+    "source code",
+    "fira code",
+    "iosevka",
+    "hasklig",
+    "sarasa",
+    "更紗",
+)
+
 
 def style_tags(info: fontfile.FontInfo, family: str) -> list[str]:
     tags: list[str] = []
@@ -121,8 +147,20 @@ def style_tags(info: fontfile.FontInfo, family: str) -> list[str]:
         tags.append("mono")
     if info.is_monospace and "mono" not in tags:
         tags.append("mono")
+    if any(k in lowered for k in _CODING_FAMILY_MARKERS):
+        # Japanese programming fonts (UDEV Gothic, HackGen, PlemolJP,
+        # Cica, Ricty, ...) pair a proportional CJK face with a fixed-width
+        # Latin one, so neither `post.isFixedPitch` nor PANOSE reports them
+        # as monospaced - the file genuinely is not. They are still built
+        # for a code editor, and they were what the old selector kept
+        # choosing for every video: highest readability, no register.
+        #
+        # This is the one place a family *name* is allowed to add a tag,
+        # and only because these families say what they are in their own
+        # names. It adds "coding"; it never removes a tag the file asserted.
+        tags.append("coding")
 
-    weight = info.weight_class or 400
+    weight = font_profile.weight_of(info)
     if weight <= 300:
         tags.append("light")
     elif weight >= 800:
@@ -177,7 +215,7 @@ def readability_score(info: fontfile.FontInfo, tags: list[str]) -> int:
         ratio = info.cap_height / upm
         score += max(-10.0, min(12.0, (ratio - 0.68) * 120.0))
 
-    weight = info.weight_class or 400
+    weight = font_profile.weight_of(info)
     if 500 <= weight <= 750:
         score += 14.0  # the band captions actually want
     elif 400 <= weight < 500:
@@ -255,17 +293,45 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _measure_weight(info: fontfile.FontInfo, path: Path) -> None:
+    """Rasterises the face to find out how heavy it actually looks.
+
+    Done once per scan and written onto the FontInfo, because a font's
+    declared weight is a claim: Dela Gothic One, a poster face, declares
+    400. Every tag and impression below then reads the measured number
+    through `font_profile.weight_of`, so a mislabelled display face stops
+    being ranked as body text.
+    """
+    if info.measured_weight:
+        return
+    ink = font_profile.ink_coverage(str(path), info.collection_index)
+    if ink is None:
+        return
+    info.ink_coverage = ink
+    info.measured_weight = font_profile.perceived_weight(info, ink)
+
+
 def _describe(info: fontfile.FontInfo, path: Path) -> dict:
     family = info.family or path.stem
+    _measure_weight(info, path)
     tags = style_tags(info, family)
+    readability = readability_score(info, tags)
+    # Impression axes and per-edit-style fitness. Computed here, at scan
+    # time, rather than at selection time: ranking 400+ faces on every
+    # production would re-read every font file, and these values only
+    # change when the file does.
+    profile = font_profile.build(info, tags, readability)
     return {
         "family": family,
         "subfamily": info.subfamily,
         "tags": tags,
         "genres": genre_fit(tags),
         "languages": languages(info),
-        "readability": readability_score(info, tags),
-        "weight": info.weight_class or 400,
+        "readability": readability,
+        "profile": profile,
+        "weight": font_profile.weight_of(info),
+        "declared_weight": info.weight_class or 400,
+        "ink_coverage": info.ink_coverage or None,
         "supports_japanese": info.supports_japanese,
         "supports_latin": info.supports_latin,
         "analysis": {
@@ -276,6 +342,13 @@ def _describe(info: fontfile.FontInfo, path: Path) -> dict:
             if info.x_height
             else None,
             "width_class": info.width_class,
+            "declared_weight_class": info.weight_class,
+            "measured_weight": info.measured_weight or None,
+            "ink_coverage": info.ink_coverage or None,
+            "weight_method": (
+                "グリフを実際に描画してインク量を測定し、"
+                "宣言値と大きく違う場合のみ採用します"
+            ),
             "glyph_count": info.glyph_count,
             "panose": list(info.panose),
             "is_variable": info.is_variable,
@@ -289,6 +362,17 @@ def _describe(info: fontfile.FontInfo, path: Path) -> dict:
                 "x-height比・ウェイト・字幅・装飾性から算出したKairoの推定値です"
                 "（実測の可読性テスト結果ではありません）"
             ),
+            "impression": {
+                "luxury": profile["luxury"],
+                "casual": profile["casual"],
+                "cinematic": profile["cinematic"],
+                "impact": profile["impact"],
+                "friendliness": profile["friendliness"],
+                "authority": profile["authority"],
+                "classification": profile["classification"],
+                "method": profile["method"],
+            },
+            "use_cases": profile["use_cases"],
         },
     }
 
@@ -305,8 +389,13 @@ def _upsert(
     license_id: str,
     license_file: str = "",
     file_size: int = 0,
+    file_path: Path | None = None,
 ) -> tuple[LibraryAsset, bool]:
-    described = _describe(info, Path(path))
+    # `path` is the identity key (LIBRARY_ROOT-relative for Kairo's own
+    # fonts, absolute for system ones); `file_path` is where the bytes
+    # actually are. They differ for library fonts, and rasterising the
+    # identity key silently measured nothing at all.
+    described = _describe(info, file_path or Path(path))
     lic = licenses.get(license_id)
 
     row = (
@@ -341,6 +430,15 @@ def _upsert(
     row.readability = described["readability"]
     row.supports_japanese = described["supports_japanese"]
     row.supports_latin = described["supports_latin"]
+    profile = described["profile"]
+    row.luxury = profile["luxury"]
+    row.casual = profile["casual"]
+    row.cinematic = profile["cinematic"]
+    row.impact = profile["impact"]
+    row.friendliness = profile["friendliness"]
+    row.authority = profile["authority"]
+    row.classification = profile["classification"]
+    row.use_cases_json = json.dumps(profile["use_cases"])
     row.category = language_dir(info)
     row.analysis_json = json.dumps(described["analysis"], ensure_ascii=False)
     row.analysis_status = "ok"
@@ -385,6 +483,7 @@ def scan(db, *, include_system: bool = True, limit: int | None = None) -> dict:
                 license_id=meta.get("license_id", "unknown"),
                 license_file=meta.get("license_file", ""),
                 file_size=file.stat().st_size,
+                file_path=file,
             )
             added += int(created)
             updated += int(not created)
@@ -416,6 +515,7 @@ def scan(db, *, include_system: bool = True, limit: int | None = None) -> dict:
                         source_url="",
                         license_id="system-bundled",
                         file_size=file.stat().st_size,
+                        file_path=file,
                     )
                     added += int(created)
                     updated += int(not created)

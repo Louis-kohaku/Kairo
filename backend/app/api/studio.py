@@ -21,9 +21,11 @@ from app.models.studio import ChangeProposal, ChatMessage, ProductionRun
 from app.services import job_manager, settings_service
 from app.services.studio import (
     cocreation_service,
+    edit_styles,
     events,
     model_service,
     planning_service,
+    platform_presets,
     quality_service,
     run_service,
 )
@@ -48,6 +50,11 @@ class StartRunRequest(BaseModel):
     # because it is a decision about this video, not a preference.
     material_mode: str = "ai_auto"
     selected_asset_ids: list[str] = Field(default_factory=list)
+    # Delivery target and edit style. Both optional: empty means "let the
+    # edit director decide from the instruction and the genre", which is
+    # the default path and what Full Auto uses.
+    platform: str = ""
+    edit_style: str = ""
 
 
 class ChatRequest(BaseModel):
@@ -71,13 +78,50 @@ def quick_actions():
     return {"actions": cocreation_service.QUICK_ACTIONS}
 
 
+@router.get("/studio/edit-styles")
+def list_edit_styles():
+    """The edit styles and delivery targets the launcher offers.
+
+    Served from the same tables the director actually uses, so the picker
+    can never offer a style the pipeline does not implement.
+    """
+    return {
+        "styles": edit_styles.style_list(),
+        "platforms": platform_presets.preset_list(),
+    }
+
+
+@router.get("/projects/{project_id}/direction")
+def get_direction(project_id: str, db: Session = Depends(get_db)):
+    """The 編集方針 the latest run decided, with its transition/caption plans."""
+    get_project_or_404(db, project_id)
+    run = run_service.latest_run(db, project_id)
+    if run is None:
+        return {"direction": None, "transitions": None, "subtitle_design": None}
+    return {
+        "direction": run_service.load_json(run.direction_json),
+        "transitions": run_service.load_json(run.transitions_json),
+        "subtitle_design": run_service.load_json(run.subtitle_design_json),
+    }
+
+
 @router.post("/projects/{project_id}/studio/start")
 async def start_run(project_id: str, payload: StartRunRequest, db: Session = Depends(get_db)):
     project = get_project_or_404(db, project_id)
 
-    # The project's frame is part of the brief, so it is applied up front
-    # rather than left for the render to discover.
+    # A named platform decides the frame, because 9:16 and 16:9 are part of
+    # what "TikTok" means. Without one the orientation still does, exactly
+    # as before.
+    platform = (payload.platform or "").strip()
+    if platform and platform not in platform_presets.PRESET_BY_ID:
+        raise HTTPException(400, f"不明な配信先です: {platform}")
+    style = (payload.edit_style or "").strip()
+    if style and style not in edit_styles.STYLE_BY_ID:
+        raise HTTPException(400, f"不明な編集スタイルです: {style}")
+
     width, height = _frame_for(payload.orientation, project.width, project.height)
+    if platform:
+        width, height = platform_presets.frame_for(platform, (width, height))
     if (project.width, project.height) != (width, height):
         project.width, project.height = width, height
         db.commit()
@@ -92,6 +136,8 @@ async def start_run(project_id: str, payload: StartRunRequest, db: Session = Dep
             mode=payload.mode,
             material_mode=payload.material_mode,
             selected_asset_ids=payload.selected_asset_ids,
+            platform=platform,
+            edit_style=style,
         )
     except run_service.RunError as exc:
         raise HTTPException(409, str(exc)) from exc

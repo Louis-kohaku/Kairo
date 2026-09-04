@@ -3,6 +3,7 @@ import { api } from "../../api/client";
 import type {
   AppSettingsPatch,
   FontCatalogEntry,
+  FontStarterSet,
   LibraryAsset,
   LibraryOverview,
 } from "../../types";
@@ -44,6 +45,7 @@ export default function LibraryTab({
   const [assets, setAssets] = useState<LibraryAsset[]>([]);
   const [total, setTotal] = useState(0);
   const [catalog, setCatalog] = useState<FontCatalogEntry[]>([]);
+  const [starter, setStarter] = useState<FontStarterSet | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,7 +62,12 @@ export default function LibraryTab({
 
   const refresh = useCallback(async () => {
     try {
-      const [ov, cat] = await Promise.all([api.getLibrary(), api.getFontCatalog()]);
+      const [ov, cat, st] = await Promise.all([
+        api.getLibrary(),
+        api.getFontCatalog(),
+        api.getFontStarterSet().catch(() => null),
+      ]);
+      setStarter(st);
       setOverview(ov);
       setCatalog(cat.catalog);
       await loadAssets(kind);
@@ -152,6 +159,58 @@ export default function LibraryTab({
           {busy === "bootstrap" ? "生成中…" : "内蔵BGM/効果音を生成"}
         </button>
       </div>
+
+      {starter && starter.installed_count < starter.total && (
+        <>
+          <h3>推奨フォントセット</h3>
+          <p className="settings-hint">
+            OSに入っている日本語フォントは、ほぼすべて文書向けの書体です。
+            そのため、編集スタイルを変えても字幕の印象がほとんど変わりません。
+            見出し用の極太ゴシック、丸ゴシック、明朝など
+            {starter.total}書体を追加すると、ジャンルに合わせた選定ができるようになります。
+            <br />
+            {starter.license} / {starter.source}
+          </p>
+          <div className="settings-row">
+            <span className="settings-state settings-state-ok">
+              {starter.installed_count} / {starter.total} 取得済み
+            </span>
+            <button
+              onClick={() =>
+                run("starter", async () => {
+                  const result = await api.installFontStarterSet();
+                  setStarter(result.starter_set);
+                  setMessage(
+                    `推奨フォント${result.installed.length}書体を取得しました` +
+                      (result.failed.length
+                        ? `（${result.failed.length}件は取得できませんでした）`
+                        : ""),
+                  );
+                })
+              }
+              disabled={!!busy}
+            >
+              {busy === "starter" ? "取得中…" : "不足分をまとめて取得"}
+            </button>
+          </div>
+          <div className="font-catalog">
+            {starter.items.map((item) => (
+              <div key={item.id} className="font-catalog-item">
+                <div className="font-catalog-head">
+                  <span className="font-catalog-family">{item.family}</span>
+                  <span className="settings-state settings-state-ok">
+                    {item.license_id}
+                  </span>
+                  {item.installed && (
+                    <span className="settings-state settings-state-ok">取得済み</span>
+                  )}
+                </div>
+                <div className="font-catalog-note">{item.purpose}</div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <h3>フォントの追加取得</h3>
       <p className="settings-hint">

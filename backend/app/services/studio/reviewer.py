@@ -578,6 +578,281 @@ def _score_trend(scenes: list, measured: dict, trend: TrendContext | None):
     )
 
 
+def _score_font(decisions, directive, measured: dict):
+    """Whether the caption face suits this video (requirement 15).
+
+    Scored from the ranking the selection actually produced rather than
+    from an opinion about the font: how well it fitted the edit style, how
+    far ahead of the runners-up it was, and whether it was legible enough
+    for the caption load this video carries. Those are the three ways a
+    font choice goes wrong, and each of them is recorded.
+    """
+    findings: list[ReviewFinding] = []
+    font = getattr(decisions, "font", None) if decisions is not None else None
+    ranking = getattr(decisions, "font_ranking", None) if decisions is not None else None
+
+    if font is None or not font.found:
+        return (
+            AxisScore(
+                axis="font",
+                label=AXIS_LABELS["font"],
+                score=0.0,
+                basis="planned",
+                detail=(font.reason if font is not None else "フォントを選んでいません"),
+            ),
+            [
+                ReviewFinding(
+                    axis="font",
+                    severity="major",
+                    problem="字幕フォントを自動選択できませんでした。",
+                    cause="ライセンス条件を満たす日本語フォントが見つかりませんでした。",
+                    suggestion=(
+                        "設定 > ライブラリで推奨フォントセットを取得すると、"
+                        "ジャンルに合わせた書体を選べるようになります。"
+                    ),
+                )
+            ],
+        )
+
+    details = [f"書体: {font.family or font.name}"]
+    score = 70.0
+
+    if ranking is not None:
+        details.append(f"{ranking.eligible}書体から選定")
+        if not ranking.profiled:
+            score -= 18.0
+            findings.append(
+                ReviewFinding(
+                    axis="font",
+                    severity="minor",
+                    problem="フォントを可読性だけで選んでいます。",
+                    cause=(
+                        "ライブラリのフォント印象プロファイルが未算出のため、"
+                        "映像の雰囲気に合わせた選定ができていません。"
+                    ),
+                    suggestion="設定 > ライブラリでフォントを再スキャンしてください。",
+                )
+            )
+        candidates = ranking.candidates or []
+        if len(candidates) >= 2:
+            lead = float(candidates[0].get("score", 0)) - float(candidates[1].get("score", 0))
+            details.append(f"次点との差{lead:.0f}点")
+            if lead < 4.0:
+                score -= 6.0
+                details.append("僅差の選定")
+        if ranking.eligible <= 3:
+            score -= 20.0
+            findings.append(
+                ReviewFinding(
+                    axis="font",
+                    severity="minor",
+                    problem=f"選べる書体が{ranking.eligible}件しかありませんでした。",
+                    cause="ライセンス条件と日本語対応を満たすフォントが少ない状態です。",
+                    suggestion="設定 > ライブラリで推奨フォントセットを取得してください。",
+                )
+            )
+        elif ranking.eligible >= 20:
+            score += 12.0
+        if candidates and candidates[0].get("recently_used"):
+            score -= 8.0
+            findings.append(
+                ReviewFinding(
+                    axis="font",
+                    severity="info",
+                    problem="直近の動画と同じ書体になりました。",
+                    cause="他に条件を満たす書体が少なかったためです。",
+                    suggestion="フォントを追加すると、動画ごとに書体を変えられます。",
+                )
+            )
+
+    if directive is not None and getattr(directive, "style_label", ""):
+        details.append(f"{directive.style_label}向けの方針で選定")
+        score += 10.0
+        # A caption-heavy video with a face chosen for its register rather
+        # than its legibility is the one combination that actually hurts.
+        if directive.subtitle.density == "high" and directive.font.min_readability < 60:
+            score -= 10.0
+            findings.append(
+                ReviewFinding(
+                    axis="font",
+                    severity="minor",
+                    problem="字幕が多い構成なのに、可読性の下限が低く設定されています。",
+                    cause=f"編集スタイル「{directive.style_label}」の既定値です。",
+                    suggestion="字幕量を下げるか、より可読性の高い書体を選んでください。",
+                )
+            )
+
+    return (
+        AxisScore(
+            axis="font",
+            label=AXIS_LABELS["font"],
+            score=_clamp(score),
+            basis="planned",
+            detail=" / ".join(details),
+        ),
+        findings,
+    )
+
+
+def _score_transition(plan, directive, scene_count: int):
+    """Whether the picture changes where it should (requirement 15).
+
+    The two failures the brief names are "Transitionが多すぎる" and its
+    opposite - a montage of unrelated shots joined by nothing. Both are
+    measurable from the plan against the style's own budget, so both are
+    scored here rather than left to the model.
+    """
+    findings: list[ReviewFinding] = []
+    if plan is None or not plan.boundary_count:
+        return (
+            AxisScore(
+                axis="transition",
+                label=AXIS_LABELS["transition"],
+                score=0.0,
+                basis="planned",
+                detail="切り替えの記録がありません",
+            ),
+            findings,
+        )
+
+    ratio = plan.non_cut_count / max(1, plan.boundary_count)
+    cap = directive.transitions.max_ratio if directive is not None else 0.25
+    score = 100.0
+    details = [
+        f"{plan.boundary_count}箇所中{plan.non_cut_count}箇所で切り替え（{ratio * 100:.0f}%）",
+        f"上限{cap * 100:.0f}%",
+    ]
+
+    if ratio > cap + 0.02:
+        over = plan.non_cut_count - int(plan.boundary_count * cap)
+        score -= min(45.0, over * 12.0)
+        findings.append(
+            ReviewFinding(
+                axis="transition",
+                severity="major" if ratio > cap * 1.6 else "minor",
+                problem=(
+                    f"画面切り替えが{plan.non_cut_count}箇所あり、"
+                    f"このスタイルの上限({cap * 100:.0f}%)を超えています。"
+                ),
+                cause="切り替えが多いと、映像そのものより演出が目立ちます。",
+                suggestion="意味のある切れ目だけに絞ってください。",
+                fix="reduce_transitions",
+                fix_value=float(max(1, int(plan.boundary_count * cap))),
+            )
+        )
+    elif plan.non_cut_count == 0 and scene_count >= 8 and cap > 0:
+        score -= 12.0
+        details.append("すべてカット")
+        findings.append(
+            ReviewFinding(
+                axis="transition",
+                severity="info",
+                problem="全カットが単純なカットつなぎです。",
+                cause="場所や時間の変化として検出できる箇所がありませんでした。",
+                suggestion=(
+                    "シーン設計に場所や時間の移り変わりを書くと、"
+                    "意味のある箇所に切り替えが入ります。"
+                ),
+            )
+        )
+    else:
+        score += 0.0
+        details.append("方針どおりの分量")
+
+    # Variety: five dissolves in a row is one transition used five times.
+    kinds = [c.transition for c in plan.choices if c.transition != "cut"]
+    if len(kinds) >= 3 and len(set(kinds)) == 1:
+        score -= 8.0
+        details.append(f"すべて同じ切り替え（{kinds[0]}）")
+
+    return (
+        AxisScore(
+            axis="transition",
+            label=AXIS_LABELS["transition"],
+            score=_clamp(score),
+            basis="planned",
+            detail=" / ".join(details),
+        ),
+        findings,
+    )
+
+
+def _score_music(decisions, directive, measured: dict):
+    """Whether the music fits the video's tempo and mood."""
+    findings: list[ReviewFinding] = []
+    music = getattr(decisions, "music", None) if decisions is not None else None
+    beat = getattr(decisions, "beat_sync", None) if decisions is not None else None
+
+    if music is None or not music.found:
+        return (
+            AxisScore(
+                axis="music",
+                label=AXIS_LABELS["music"],
+                score=0.0,
+                basis="measured",
+                detail=(music.reason if music is not None else "BGMが選ばれていません"),
+            ),
+            [
+                ReviewFinding(
+                    axis="music",
+                    severity="major",
+                    problem="BGMが入っていません。",
+                    cause="ライセンス条件を満たすBGMがライブラリにありませんでした。",
+                    suggestion="設定 > ライブラリでBGMを生成するか、音源を追加してください。",
+                )
+            ],
+        )
+
+    score = 72.0
+    details = [f"{music.name}"]
+    if music.bpm:
+        details.append(f"{music.bpm:.0f}BPM")
+        if directive is not None and len(directive.audio.bgm_bpm_range) == 2:
+            low, high = directive.audio.bgm_bpm_range
+            if low <= music.bpm <= high:
+                score += 16.0
+                details.append(f"方針({low:.0f}-{high:.0f}BPM)の範囲内")
+            else:
+                distance = min(abs(music.bpm - low), abs(music.bpm - high))
+                score -= min(28.0, distance * 0.7)
+                findings.append(
+                    ReviewFinding(
+                        axis="music",
+                        severity="minor",
+                        problem=(
+                            f"BGMのテンポ({music.bpm:.0f}BPM)が、この動画の方針"
+                            f"({low:.0f}-{high:.0f}BPM)から外れています。"
+                        ),
+                        cause="この雰囲気・テンポに合う曲がライブラリにありませんでした。",
+                        suggestion="BGMを追加するか、動画のテンポを見直してください。",
+                    )
+                )
+    else:
+        score -= 10.0
+        details.append("テンポ不明")
+
+    if beat is not None and beat.applied:
+        score += 12.0
+        details.append(f"{beat.adjusted_scenes}カットをビートに同期")
+    elif beat is not None:
+        details.append("ビート同期なし")
+
+    if directive is not None and music.category and directive.audio.bgm_mood:
+        if directive.audio.bgm_mood in (music.category, getattr(music, "name", "")):
+            score += 8.0
+
+    return (
+        AxisScore(
+            axis="music",
+            label=AXIS_LABELS["music"],
+            score=_clamp(score),
+            basis="planned",
+            detail=" / ".join(details),
+        ),
+        findings,
+    )
+
+
 # --------------------------------------------------------------- AI pass
 
 
@@ -595,7 +870,8 @@ def _ai_prompt(scenes: list, measured: dict, axes: list[AxisScore]) -> list[dict
         '{"summary": "...", "strengths": ["..."], "findings": '
         '[{"axis": "hook", "severity": "major", "problem": "...", "cause": "...", '
         '"suggestion": "...", "scene_index": 0}]}\n\n'
-        "axis は hook / pacing / visual / subtitle / audio / story / trend_alignment のいずれか。"
+        "axis は hook / pacing / visual / subtitle / font / transition / music / audio / "
+        "story / trend_alignment のいずれか。"
         "severity は info / minor / major。実測値と矛盾することを書かないこと。"
     )
     user = (
@@ -654,6 +930,9 @@ def review(
     has_narration: bool = False,
     iteration: int = 0,
     use_ai: bool = True,
+    decisions=None,
+    directive=None,
+    transitions=None,
 ) -> VideoReview:
     """Scores one rendered video. Never raises."""
     measured = measure(output_path)
@@ -675,6 +954,9 @@ def review(
         lambda: _score_pacing(scenes, measured, profile),
         lambda: _score_visual(measured),
         lambda: _score_subtitle(scenes, cues, measured, max_chars_per_line),
+        lambda: _score_font(decisions, directive, measured),
+        lambda: _score_transition(transitions, directive, len(scenes)),
+        lambda: _score_music(decisions, directive, measured),
         lambda: _score_audio(measured, has_bgm, has_narration),
         lambda: _score_story(scenes, strategy),
         lambda: _score_trend(scenes, measured, trend),
@@ -696,10 +978,16 @@ def review(
     # evaluated. An axis that scored 0 because it was not applicable
     # (trend alignment with no trend data) would otherwise drag the whole
     # video down for a reason that has nothing to do with the video.
+    # An axis that could not be evaluated - no trend data, no directive to
+    # judge the craft decisions against - is excluded rather than scored 0,
+    # because a zero there would drag the video down for a reason that has
+    # nothing to do with the video.
+    craft_available = decisions is not None or transitions is not None
     scored = [
         a
         for a in axes
         if not (a.axis == "trend_alignment" and (trend is None or not trend.used))
+        and not (a.axis in ("font", "transition", "music") and not craft_available)
     ]
     overall = sum(a.score for a in scored) / len(scored) if scored else 0.0
 

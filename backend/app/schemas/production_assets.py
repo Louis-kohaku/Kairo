@@ -88,12 +88,37 @@ class SubtitleDecision(BaseModel):
     from_trend_profile: bool = False
 
 
+class FontRanking(BaseModel):
+    """The font decision, with the field it was decided against.
+
+    Requirement 3 asks for the font choice to be inspectable from the
+    production log. That means recording the runners-up and the counts, not
+    only the winner: "why this font" is only answerable next to "instead of
+    which others".
+    """
+
+    considered: int = 0
+    eligible: int = 0
+    rejected_for_license: int = 0
+    below_readability_floor: int = 0
+    readability_floor: int = 0
+    caption_load: float = 0.0
+    size_pressure: float = 0.0
+    # Whether the library actually has impression profiles. False means the
+    # ranking fell back to readability, and the UI says so rather than
+    # presenting a legibility ranking as a style decision.
+    profiled: bool = False
+    recent_families: list[str] = Field(default_factory=list)
+    candidates: list[dict] = Field(default_factory=list)
+
+
 class AssetDecisions(BaseModel):
     """Everything the Creative Director decided for one run."""
 
     genre: str = "unknown"
     genre_label: str = ""
     font: Optional[AssetChoice] = None
+    font_ranking: Optional[FontRanking] = None
     music: Optional[AssetChoice] = None
     sfx: list[SfxPlacement] = Field(default_factory=list)
     sfx_assets: list[AssetChoice] = Field(default_factory=list)

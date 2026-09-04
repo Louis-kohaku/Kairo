@@ -87,6 +87,24 @@ class LibraryAsset(Base):
     supports_japanese: Mapped[bool] = mapped_column(Boolean, default=False)
     supports_latin: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # --- Fonts: impression axes (0-100) ---------------------------------
+    # Derived by services/library/font_profile.py from the font's own
+    # metrics and PANOSE classification - never from its name alone, and
+    # never asserted as fact: each is a repeatable heuristic that lets the
+    # edit director ask for "上品な細い書体" or "力強い太いゴシック" and get a
+    # ranking it can justify. They are the reason a Vlog and a game short
+    # no longer land on the same face.
+    luxury: Mapped[int] = mapped_column(Integer, default=0)
+    casual: Mapped[int] = mapped_column(Integer, default=0)
+    cinematic: Mapped[int] = mapped_column(Integer, default=0)
+    impact: Mapped[int] = mapped_column(Integer, default=0)
+    friendliness: Mapped[int] = mapped_column(Integer, default=0)
+    authority: Mapped[int] = mapped_column(Integer, default=0)
+    # Per-use-case fitness (0-100), keyed by edit style id. JSON object.
+    use_cases_json: Mapped[str] = mapped_column(Text, default="{}")
+    # sans | serif | rounded | display | handwritten | mono | unknown
+    classification: Mapped[str] = mapped_column(String, default="unknown")
+
     # Audio: measured, not declared. NULL means "not analysed yet", which is
     # different from 0 and is never rendered as a number in the UI.
     duration: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
