@@ -1222,3 +1222,4 @@ npm --prefix frontend run lint      # oxlintのみ
 - 映像素材生成: Pillow によるプロシージャル合成 (追加ダウンロード不要) / 任意で diffusers
 - 音声: Windows SAPI (System.Speech) によるナレーション、FFmpegによるBGM・効果音の合成
 - AI (動画生成・実験的): PyTorch (CPU版) + diffusers + Stable Video Diffusion (`requirements-videogen.txt`、任意インストール)
+
